@@ -19,6 +19,7 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import expect, Page, Response
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from services.epic_totp_service import submit_totp_challenge
 from settings import SCREENSHOTS_DIR, settings
 
 URL_CLAIM = "https://store.epicgames.com/en-US/free-games"
@@ -335,6 +336,8 @@ class EpicAuthorization:
 
     async def _await_login_outcome(self, point_url: str, timeout_seconds: int = 60) -> None:
         deadline = time.monotonic() + timeout_seconds
+        totp_attempts = 0
+        max_totp_attempts = 2
 
         while time.monotonic() < deadline:
             if not self._login_error_signal.empty():
@@ -352,6 +355,17 @@ class EpicAuthorization:
                     raise RuntimeError(error_code)
 
                 if self._is_two_factor_required_error(error_code):
+                    if totp_attempts >= max_totp_attempts:
+                        logger.error(
+                            "Epic still requires authenticator 2FA after {} TOTP submission(s); "
+                            "aborting. Verify EPIC_TOTP_SECRET and the host clock.",
+                            totp_attempts,
+                        )
+                        raise EpicAuthenticationFatalError(error_code)
+                    totp_attempts += 1
+                    if await submit_totp_challenge(self.page):
+                        self._drain_queue(self._login_error_signal)
+                        continue
                     raise EpicAuthenticationFatalError(error_code)
 
                 raise RuntimeError(error_code)
@@ -540,8 +554,8 @@ class EpicAuthorization:
             await self.page.screenshot(path=sr.joinpath(f"login-{int(time.time())}.png"))
             if isinstance(err, EpicAuthenticationFatalError):
                 logger.error(
-                    "Epic account requires two-factor authentication, which is not supported by this project. "
-                    "Disable Epic 2FA (email / SMS / authenticator) and rerun the workflow."
+                    "Epic account requires two-factor authentication. Configure EPIC_TOTP_SECRET "
+                    "for authenticator app 2FA, or disable Epic 2FA and rerun the workflow."
                 )
                 raise
             if isinstance(err, EpicManualActionRequiredError):

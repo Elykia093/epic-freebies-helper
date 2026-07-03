@@ -24,7 +24,12 @@ from pytz import timezone
 
 from services.epic_authorization_service import EpicAuthorization
 from services.browser_context import open_browser_context
+from services.epic_collection_summary_service import collect_epic_games_with_summary
 from services.epic_games_service import EpicAgent
+from services.telegram_notification_service import (
+    failure_summary_from_exception,
+    send_collection_summary_to_telegram,
+)
 from settings import LOG_DIR
 from settings import settings
 from utils import init_log
@@ -78,7 +83,7 @@ async def execute_browser_tasks(headless: bool = True):
         logger.debug("Starting free games collection process")
         game_page = await browser.new_page()
         agent = EpicAgent(game_page)
-        await agent.collect_epic_games()
+        summary = await collect_epic_games_with_summary(agent)
         logger.debug("Free games collection completed")
 
         # Cleanup browser resources
@@ -88,6 +93,20 @@ async def execute_browser_tasks(headless: bool = True):
                 await p.close()
 
         logger.debug("Browser tasks execution finished successfully")
+        return summary
+
+
+async def execute_browser_tasks_with_notification(headless: bool = True):
+    try:
+        if configuration_error := settings.llm_configuration_error:
+            logger.error(configuration_error)
+            raise RuntimeError(configuration_error)
+        summary = await execute_browser_tasks(headless=headless)
+    except Exception as err:
+        await send_collection_summary_to_telegram(failure_summary_from_exception(err))
+        raise
+    else:
+        await send_collection_summary_to_telegram(summary)
 
 
 async def deploy():
@@ -106,12 +125,8 @@ async def deploy():
         f"Starting deployment with configuration: {json.dumps(sj, indent=2, ensure_ascii=False)}"
     )
 
-    if configuration_error := settings.llm_configuration_error:
-        logger.error(configuration_error)
-        raise RuntimeError(configuration_error)
-
     # Execute an immediate collection task
-    await execute_browser_tasks(headless=headless)
+    await execute_browser_tasks_with_notification(headless=headless)
 
     # Skip scheduler setup if disabled in configuration
     if not settings.ENABLE_APSCHEDULER:
@@ -123,7 +138,7 @@ async def deploy():
 
     # Strategy 1: Thursday 23:30 to Friday 03:30, every hour (Beijing Time)
     scheduler.add_job(
-        execute_browser_tasks,
+        execute_browser_tasks_with_notification,
         trigger=CronTrigger(
             day_of_week="thu", hour="23,0,1,2,3", minute="30", timezone="Asia/Shanghai"
         ),
@@ -136,7 +151,7 @@ async def deploy():
 
     # Strategy 2: Daily at 12:00 PM (Beijing Time)
     scheduler.add_job(
-        execute_browser_tasks,
+        execute_browser_tasks_with_notification,
         trigger=CronTrigger(hour="12", minute="0", timezone="Asia/Shanghai"),
         id="daily_epic_games_task",
         name="daily_epic_games_task",

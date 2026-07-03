@@ -1,3 +1,5 @@
+> GitHub Actions 现在支持可选的验证器 2FA：把验证器二维码对应的 base32 secret 填到 `EPIC_TOTP_SECRET`，运行时会自动生成 6 位 TOTP；邮箱 / 短信 2FA 仍不支持。如需推送 Telegram Bot，可配置 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID`；通知会包含运行状态、工作流上下文、本周游戏、本次新领取、之前已领取，失败时还会包含未确认成功项目和精简后的主要失败原因。
+
 <div align="center">
   <h1>Epic 周免游戏领取助手</h1>
   <p>A fully free Epic weekly free-games claimer powered by GitHub Actions.</p>
@@ -59,7 +61,7 @@
 ## 环境与前提要求
 
 - Epic 账号邮箱与密码（用于登录）。
-- 关闭 Epic 账号 2FA（邮箱/短信/验证器）。
+- 关闭 Epic 账号邮箱 / 短信 2FA；如使用验证器 App 2FA，请配置 `EPIC_TOTP_SECRET`。
 - 注册 GLM 并准备 `GLM_API_KEY`（用于验证码识别）。
 
 ---
