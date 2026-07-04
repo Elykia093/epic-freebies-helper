@@ -775,3 +775,23 @@
 - 处理结果：
   - TOTP 等待逻辑在确认 MFA 页面信号后不再强依赖普通输入框。
   - 如果选择器填码失败，会尝试聚焦可见的小码格并通过键盘输入 6 位验证码。
+
+### 2026-07-04 Epic TOTP 无效或过期后的同页重试
+
+- 现象：
+  - GitHub Actions run `28711136215` 已经能输出 `Submitted Epic authenticator 2FA code`，说明验证码输入路径生效。
+  - 随后 Epic `/id/api/login/mfa` 返回 `errors.com.epicgames.accountportal.mfa_code_invalid`，并提示 `The security code is invalid or expired.`。
+  - 部分尝试在提交 TOTP 后还会继续处理 hCaptcha，导致真正提交到 Epic MFA 接口时验证码可能已经跨过有效窗口。
+- 根因判断：
+  - 旧逻辑把 `mfa_code_invalid` 当成普通登录失败，直接重开整轮登录，无法在 MFA 页面上快速换用下一轮新 TOTP。
+  - TOTP 生成只在剩余 5 秒内等待新窗口，对 GitHub Actions 上可能出现的 hCaptcha 延迟不够保守。
+  - TOTP 提交成功后立即清空错误队列，存在吞掉快速返回的 MFA 错误响应的风险。
+- 改动文件：
+  - `app/services/epic_totp_service.py`
+  - `app/services/epic_authorization_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 生成 TOTP 时要求保留更长有效窗口，并在无效重试时强制等待下一轮新 TOTP。
+  - 同页重试前会清空可见码格，避免旧验证码残留或叠加输入。
+  - `mfa_code_invalid` 改为可恢复错误，会在 MFA 页面用新验证码重试；连续失败后才明确提示检查 `EPIC_TOTP_SECRET` 和运行主机时间。
+  - TOTP 提交后不再清空新产生的登录错误队列，避免丢失 Epic MFA 接口的真实反馈。

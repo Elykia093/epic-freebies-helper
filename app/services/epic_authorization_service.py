@@ -71,6 +71,10 @@ class EpicAuthorization:
     def _is_two_factor_required_error(error_code: str) -> bool:
         return error_code == "errors.com.epicgames.common.two_factor_authentication.required"
 
+    @staticmethod
+    def _is_mfa_code_invalid_error(error_code: str) -> bool:
+        return error_code == "errors.com.epicgames.accountportal.mfa_code_invalid"
+
     async def _handle_right_account_validation(self):
         """
         以下验证仅会在登录成功后出现
@@ -337,7 +341,7 @@ class EpicAuthorization:
     async def _await_login_outcome(self, point_url: str, timeout_seconds: int = 60) -> None:
         deadline = time.monotonic() + timeout_seconds
         totp_attempts = 0
-        max_totp_attempts = 2
+        max_totp_attempts = 3
 
         while time.monotonic() < deadline:
             if not self._login_error_signal.empty():
@@ -363,8 +367,28 @@ class EpicAuthorization:
                         )
                         raise EpicAuthenticationFatalError(error_code)
                     totp_attempts += 1
+                    self._drain_queue(self._login_error_signal)
                     if await submit_totp_challenge(self.page):
-                        self._drain_queue(self._login_error_signal)
+                        continue
+                    raise EpicAuthenticationFatalError(error_code)
+
+                if self._is_mfa_code_invalid_error(error_code):
+                    if totp_attempts >= max_totp_attempts:
+                        logger.error(
+                            "Epic rejected {} authenticator TOTP submission(s) as invalid "
+                            "or expired. Verify EPIC_TOTP_SECRET and the host clock.",
+                            totp_attempts,
+                        )
+                        raise EpicAuthenticationFatalError(error_code)
+                    totp_attempts += 1
+                    logger.warning(
+                        "Epic rejected authenticator TOTP code as invalid or expired; "
+                        "retrying with a fresh code on the MFA page ({}/{})",
+                        totp_attempts,
+                        max_totp_attempts,
+                    )
+                    self._drain_queue(self._login_error_signal)
+                    if await submit_totp_challenge(self.page, force_next_code=True):
                         continue
                     raise EpicAuthenticationFatalError(error_code)
 
@@ -384,8 +408,9 @@ class EpicAuthorization:
                     )
                 continue
 
-            if "true" == await self._get_login_status(timeout_ms=500):
-                return
+            if "/id/login/mfa" not in self.page.url.lower():
+                if "true" == await self._get_login_status(timeout_ms=500):
+                    return
 
             await self.page.wait_for_timeout(500)
 

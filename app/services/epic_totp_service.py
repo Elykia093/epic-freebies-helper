@@ -17,6 +17,7 @@ TOTP_INPUT_SELECTORS = (
     "input[type='tel']",
 )
 GENERIC_TEXT_INPUT_SELECTORS = ("input[type='text']",)
+TOTP_MIN_SECONDS_REMAINING = 12
 
 
 def _totp_secret_value() -> str | None:
@@ -24,7 +25,7 @@ def _totp_secret_value() -> str | None:
     return secret or None
 
 
-async def _current_totp_code(page: Page) -> str | None:
+async def _current_totp_code(page: Page, *, force_next_window: bool = False) -> str | None:
     secret = _totp_secret_value()
     if not secret:
         return None
@@ -32,8 +33,16 @@ async def _current_totp_code(page: Page) -> str | None:
     try:
         totp = pyotp.TOTP(secret)
         remaining = totp.interval - (time.time() % totp.interval)
-        if remaining < 5:
+        if force_next_window or remaining < TOTP_MIN_SECONDS_REMAINING:
+            logger.warning(
+                "Waiting for fresh Epic authenticator TOTP window | reason={} "
+                "seconds_until_next={:.1f}",
+                "invalid_retry" if force_next_window else "near_expiry",
+                remaining,
+            )
             await page.wait_for_timeout(int((remaining + 1) * 1000))
+            remaining = totp.interval - (time.time() % totp.interval)
+        logger.debug("Generated Epic authenticator TOTP code | seconds_remaining={:.1f}", remaining)
         return totp.now()
     except Exception as err:
         logger.error(
@@ -159,6 +168,69 @@ async def _focus_totp_entry(page: Page) -> bool:
     return False
 
 
+async def _clear_totp_entry(page: Page) -> None:
+    focused = False
+    with suppress(Exception):
+        focused = await page.evaluate(
+            """
+            () => {
+              const isVisible = (element) => {
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0 &&
+                  style.visibility !== 'hidden' &&
+                  style.display !== 'none' &&
+                  style.opacity !== '0';
+              };
+              const candidates = Array.from(document.querySelectorAll(
+                "input, [contenteditable='true'], [role='textbox']"
+              ))
+                .filter(isVisible)
+                .filter((element) => {
+                  const rect = element.getBoundingClientRect();
+                  const marker = [
+                    element.getAttribute('autocomplete'),
+                    element.getAttribute('name'),
+                    element.getAttribute('id'),
+                    element.getAttribute('inputmode'),
+                    element.getAttribute('type'),
+                    element.getAttribute('aria-label'),
+                  ].join(' ').toLowerCase();
+                  const looksLikeCodeBox = rect.width >= 20 && rect.width <= 120 &&
+                    rect.height >= 20 && rect.height <= 120;
+                  return looksLikeCodeBox ||
+                    marker.includes('code') ||
+                    marker.includes('numeric') ||
+                    marker.includes('one-time');
+                });
+
+              for (const element of candidates) {
+                if ('value' in element) {
+                  element.value = '';
+                  element.dispatchEvent(new Event('input', { bubbles: true }));
+                  element.dispatchEvent(new Event('change', { bubbles: true }));
+                } else if (element.isContentEditable) {
+                  element.textContent = '';
+                  element.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+              }
+
+              const target = candidates[0];
+              if (target) {
+                target.click();
+                return true;
+              }
+              return false;
+            }
+            """
+        )
+
+    if focused:
+        with suppress(Exception):
+            await page.keyboard.press("Control+A")
+            await page.keyboard.press("Backspace")
+
+
 async def _wait_for_totp_input(page: Page, timeout_ms: int = 20000) -> bool:
     deadline = time.monotonic() + timeout_ms / 1000
 
@@ -181,8 +253,8 @@ async def _wait_for_totp_input(page: Page, timeout_ms: int = 20000) -> bool:
     return False
 
 
-async def submit_totp_challenge(page: Page) -> bool:
-    code = await _current_totp_code(page)
+async def submit_totp_challenge(page: Page, *, force_next_code: bool = False) -> bool:
+    code = await _current_totp_code(page, force_next_window=force_next_code)
     if not code:
         logger.error(
             "Epic account requires authenticator 2FA, but no valid TOTP code could be "
@@ -193,6 +265,8 @@ async def submit_totp_challenge(page: Page) -> bool:
     if not await _wait_for_totp_input(page):
         logger.error("Could not find Epic authenticator 2FA code input after waiting")
         return False
+
+    await _clear_totp_entry(page)
 
     selectors = TOTP_INPUT_SELECTORS
     if await _page_has_mfa_signal(page):
