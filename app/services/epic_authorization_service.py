@@ -388,7 +388,11 @@ class EpicAuthorization:
             )
             totp_attempts += 1
             self._drain_retryable_mfa_errors()
-            if not await submit_totp_challenge(self.page, force_next_code=force_next_code):
+            if not await submit_totp_challenge(
+                self.page,
+                force_next_code=force_next_code,
+                before_submit=self._drain_retryable_mfa_errors,
+            ):
                 raise EpicAuthenticationFatalError(reason)
 
         while time.monotonic() < deadline:

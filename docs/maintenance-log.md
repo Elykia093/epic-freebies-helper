@@ -829,3 +829,20 @@
   - TOTP 提交改为先等待并清空 MFA 输入区，再贴近填码/点击时生成 fresh code。
   - 登录 outcome 内部会识别并求解可见 hCaptcha；如果验证码完成后仍停在 `/id/login/mfa`，会在同一页面重新提交 fresh TOTP。
   - 登录 outcome 单次等待窗口拉长到覆盖多轮 hCaptcha，避免旧的 25 秒外层循环提前终止认证流程。
+
+### 2026-07-05 fresh TOTP 前清理旧 MFA 错误响应
+
+- 现象：
+  - GitHub Actions run `28713927711` 证明 hCaptcha 后已经能在同页提交 `seconds_remaining=29.0` 的 fresh TOTP。
+  - 但上一轮 `/id/api/login/mfa` 的 `mfa_code_invalid` 会在等待下一个 TOTP 窗口期间晚到队列里。
+  - fresh TOTP 提交后，登录 outcome 会先读到这条旧错误，并误判 fresh code 失败。
+- 根因判断：
+  - 原先只在进入 `submit_totp_challenge` 前清理可恢复 MFA 错误；如果为了等待下一轮 TOTP 消耗数秒，旧响应可能在等待期间入队。
+  - 需要在真正点击 MFA 提交按钮前再清一次旧 MFA 错误，保证点击后的错误才代表 fresh code 的结果。
+- 改动文件：
+  - `app/services/epic_totp_service.py`
+  - `app/services/epic_authorization_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - `submit_totp_challenge` 支持提交前回调。
+  - 登录认证在点击 fresh TOTP 前清理旧的可恢复 MFA 错误，避免 stale `mfa_code_invalid` 消耗后续重试额度。

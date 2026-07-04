@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from contextlib import suppress
 
 import pyotp
@@ -253,7 +254,9 @@ async def _wait_for_totp_input(page: Page, timeout_ms: int = 20000) -> bool:
     return False
 
 
-async def submit_totp_challenge(page: Page, *, force_next_code: bool = False) -> bool:
+async def submit_totp_challenge(
+    page: Page, *, force_next_code: bool = False, before_submit: Callable[[], None] | None = None
+) -> bool:
     if not await _wait_for_totp_input(page):
         logger.error("Could not find Epic authenticator 2FA code input after waiting")
         return False
@@ -300,6 +303,9 @@ async def submit_totp_challenge(page: Page, *, force_next_code: bool = False) ->
     if not filled:
         logger.error("Could not find Epic authenticator 2FA code input")
         return False
+
+    if before_submit:
+        before_submit()
 
     clicked = False
     for selector in (
