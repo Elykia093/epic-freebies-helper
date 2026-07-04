@@ -125,6 +125,40 @@ async def _has_visible_totp_input(page: Page, selectors: tuple[str, ...]) -> boo
     return False
 
 
+async def _focus_totp_entry(page: Page) -> bool:
+    with suppress(Exception):
+        return await page.evaluate(
+            """
+            () => {
+              const isVisible = (element) => {
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0 &&
+                  style.visibility !== 'hidden' &&
+                  style.display !== 'none' &&
+                  style.opacity !== '0';
+              };
+              const candidates = Array.from(document.querySelectorAll(
+                "input, [contenteditable='true'], [role='textbox'], [tabindex]"
+              ))
+                .filter(isVisible)
+                .filter((element) => {
+                  const rect = element.getBoundingClientRect();
+                  return rect.width >= 24 && rect.width <= 90 &&
+                    rect.height >= 24 && rect.height <= 90;
+                });
+              const target = candidates[0];
+              if (!target) {
+                return false;
+              }
+              target.click();
+              return true;
+            }
+            """
+        )
+    return False
+
+
 async def _wait_for_totp_input(page: Page, timeout_ms: int = 20000) -> bool:
     deadline = time.monotonic() + timeout_ms / 1000
 
@@ -137,6 +171,9 @@ async def _wait_for_totp_input(page: Page, timeout_ms: int = 20000) -> bool:
         if await _page_has_mfa_signal(page) and await _has_visible_totp_input(
             page, GENERIC_TEXT_INPUT_SELECTORS
         ):
+            return True
+
+        if await _page_has_mfa_signal(page):
             return True
 
         await page.wait_for_timeout(500)
@@ -180,6 +217,11 @@ async def submit_totp_challenge(page: Page) -> bool:
             break
         except Exception:
             continue
+
+    if not filled and await _page_has_mfa_signal(page):
+        await _focus_totp_entry(page)
+        await page.keyboard.type(code, delay=80)
+        filled = True
 
     if not filled:
         logger.error("Could not find Epic authenticator 2FA code input")
