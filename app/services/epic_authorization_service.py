@@ -67,6 +67,21 @@ class EpicAuthorization:
             with suppress(Exception):
                 queue.get_nowait()
 
+    def _drain_retryable_mfa_errors(self) -> None:
+        retained = []
+        while not self._login_error_signal.empty():
+            with suppress(Exception):
+                result = self._login_error_signal.get_nowait()
+                error_code = result.get("errorCode", "unknown_error")
+                if self._is_two_factor_required_error(
+                    error_code
+                ) or self._is_mfa_code_invalid_error(error_code):
+                    continue
+                retained.append(result)
+
+        for result in retained:
+            self._login_error_signal.put_nowait(result)
+
     @staticmethod
     def _is_two_factor_required_error(error_code: str) -> bool:
         return error_code == "errors.com.epicgames.common.two_factor_authentication.required"
@@ -74,6 +89,9 @@ class EpicAuthorization:
     @staticmethod
     def _is_mfa_code_invalid_error(error_code: str) -> bool:
         return error_code == "errors.com.epicgames.accountportal.mfa_code_invalid"
+
+    def _is_mfa_page(self) -> bool:
+        return "/id/login/mfa" in self.page.url.lower()
 
     async def _handle_right_account_validation(self):
         """
@@ -338,10 +356,40 @@ class EpicAuthorization:
 
         raise PlaywrightTimeoutError("Timed out navigating to Epic claim page")
 
-    async def _await_login_outcome(self, point_url: str, timeout_seconds: int = 60) -> None:
+    async def _await_login_outcome(
+        self, point_url: str, agent: AgentV, timeout_seconds: int = 180
+    ) -> None:
         deadline = time.monotonic() + timeout_seconds
         totp_attempts = 0
         max_totp_attempts = 3
+        last_captcha_totp_refresh_at = 0.0
+        captcha_totp_refresh_cooldown = 8.0
+
+        async def submit_fresh_totp(reason: str) -> None:
+            nonlocal totp_attempts
+
+            if totp_attempts >= max_totp_attempts:
+                if self._is_mfa_code_invalid_error(reason):
+                    logger.error(
+                        "Epic rejected {} authenticator TOTP submission(s) as invalid "
+                        "or expired. Verify EPIC_TOTP_SECRET and the host clock.",
+                        totp_attempts,
+                    )
+                else:
+                    logger.error(
+                        "Epic still requires authenticator 2FA after {} TOTP submission(s); "
+                        "aborting. Verify EPIC_TOTP_SECRET and the host clock.",
+                        totp_attempts,
+                    )
+                raise EpicAuthenticationFatalError(reason)
+
+            force_next_code = self._is_mfa_code_invalid_error(reason) or (
+                reason == "captcha_after_mfa" and totp_attempts > 0
+            )
+            totp_attempts += 1
+            self._drain_retryable_mfa_errors()
+            if not await submit_totp_challenge(self.page, force_next_code=force_next_code):
+                raise EpicAuthenticationFatalError(reason)
 
         while time.monotonic() < deadline:
             if not self._login_error_signal.empty():
@@ -359,38 +407,18 @@ class EpicAuthorization:
                     raise RuntimeError(error_code)
 
                 if self._is_two_factor_required_error(error_code):
-                    if totp_attempts >= max_totp_attempts:
-                        logger.error(
-                            "Epic still requires authenticator 2FA after {} TOTP submission(s); "
-                            "aborting. Verify EPIC_TOTP_SECRET and the host clock.",
-                            totp_attempts,
-                        )
-                        raise EpicAuthenticationFatalError(error_code)
-                    totp_attempts += 1
-                    self._drain_queue(self._login_error_signal)
-                    if await submit_totp_challenge(self.page):
-                        continue
-                    raise EpicAuthenticationFatalError(error_code)
+                    await submit_fresh_totp("two_factor_required")
+                    continue
 
                 if self._is_mfa_code_invalid_error(error_code):
-                    if totp_attempts >= max_totp_attempts:
-                        logger.error(
-                            "Epic rejected {} authenticator TOTP submission(s) as invalid "
-                            "or expired. Verify EPIC_TOTP_SECRET and the host clock.",
-                            totp_attempts,
-                        )
-                        raise EpicAuthenticationFatalError(error_code)
-                    totp_attempts += 1
                     logger.warning(
                         "Epic rejected authenticator TOTP code as invalid or expired; "
                         "retrying with a fresh code on the MFA page ({}/{})",
-                        totp_attempts,
+                        totp_attempts + 1,
                         max_totp_attempts,
                     )
-                    self._drain_queue(self._login_error_signal)
-                    if await submit_totp_challenge(self.page, force_next_code=True):
-                        continue
-                    raise EpicAuthenticationFatalError(error_code)
+                    await submit_fresh_totp(error_code)
+                    continue
 
                 raise RuntimeError(error_code)
 
@@ -408,7 +436,41 @@ class EpicAuthorization:
                     )
                 continue
 
-            if "/id/login/mfa" not in self.page.url.lower():
+            if await self._has_visible_hcaptcha():
+                logger.warning(
+                    "Login captcha is visible during authentication outcome; solving before "
+                    "continuing | current_url='{}'",
+                    self.page.url,
+                )
+                challenge_solved = False
+                try:
+                    await agent.wait_for_challenge()
+                    challenge_solved = True
+                except Exception as err:
+                    logger.warning(
+                        "Login captcha solve attempt failed during authentication outcome | err={!r}",
+                        err,
+                    )
+
+                if challenge_solved and self._is_mfa_page():
+                    now = time.monotonic()
+                    if now - last_captcha_totp_refresh_at >= captcha_totp_refresh_cooldown:
+                        logger.warning(
+                            "Login captcha finished while Epic is still on MFA page; submitting a "
+                            "fresh authenticator TOTP code"
+                        )
+                        await submit_fresh_totp("captcha_after_mfa")
+                        last_captcha_totp_refresh_at = time.monotonic()
+                    else:
+                        logger.debug(
+                            "Skipping immediate duplicate TOTP refresh after captcha; waiting for "
+                            "Epic MFA response"
+                        )
+
+                await self.page.wait_for_timeout(500)
+                continue
+
+            if not self._is_mfa_page():
                 if "true" == await self._get_login_status(timeout_ms=500):
                     return
 
@@ -538,27 +600,7 @@ class EpicAuthorization:
             # Active hCaptcha checkbox
             await self.page.click("#sign-in")
 
-            login_confirmed = False
-            for challenge_attempt in range(1, 4):
-                logger.debug("Solving login challenge attempt {}/3", challenge_attempt)
-                with suppress(Exception):
-                    await agent.wait_for_challenge()
-
-                try:
-                    await self._await_login_outcome(point_url, timeout_seconds=25)
-                    login_confirmed = True
-                    break
-                except PlaywrightTimeoutError:
-                    if not await self._has_visible_hcaptcha():
-                        raise
-                    logger.warning(
-                        "Login outcome timed out while captcha is still visible; retrying solve "
-                        "attempt {}/3",
-                        challenge_attempt,
-                    )
-
-            if not login_confirmed:
-                await self._await_login_outcome(point_url, timeout_seconds=10)
+            await self._await_login_outcome(point_url, agent, timeout_seconds=180)
             logger.success("Login success")
 
             if self._needs_mfa_setup_prompt() and not await self._dismiss_mfa_setup_prompt(

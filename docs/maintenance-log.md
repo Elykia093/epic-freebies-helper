@@ -812,3 +812,20 @@
   - 在目标 schema 包含 `paths` 时，支持把 `answer: [[x1, y1], [x2, y2]]` 转换为 hCaptcha 需要的拖拽路径。
   - 转换时排除 4 值矩形框，避免影响 area-select 的 bbox 归一化。
   - 追加对应 GLM adapter 回归样例；由于本仓库规则禁止执行测试，本次只做静态验证。
+
+### 2026-07-05 登录 hCaptcha 拖过期 TOTP 后同页刷新验证码
+
+- 现象：
+  - GitHub Actions 中 TOTP 已填入并提交，但随后登录 hCaptcha 解题耗时超过 30 秒。
+  - Epic 最终用过期验证码请求 `/id/api/login/mfa`，返回 `errors.com.epicgames.accountportal.mfa_code_invalid`。
+- 根因判断：
+  - TOTP 在等待 MFA 输入框之前生成，验证码有效窗口会被页面渲染和后续 hCaptcha 消耗。
+  - 登录 outcome 只依赖外层短超时循环处理 hCaptcha，导致验证码仍在解题时外层流程可能先超时并关闭页面。
+- 改动文件：
+  - `app/services/epic_totp_service.py`
+  - `app/services/epic_authorization_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - TOTP 提交改为先等待并清空 MFA 输入区，再贴近填码/点击时生成 fresh code。
+  - 登录 outcome 内部会识别并求解可见 hCaptcha；如果验证码完成后仍停在 `/id/login/mfa`，会在同一页面重新提交 fresh TOTP。
+  - 登录 outcome 单次等待窗口拉长到覆盖多轮 hCaptcha，避免旧的 25 秒外层循环提前终止认证流程。

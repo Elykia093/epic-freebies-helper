@@ -254,6 +254,12 @@ async def _wait_for_totp_input(page: Page, timeout_ms: int = 20000) -> bool:
 
 
 async def submit_totp_challenge(page: Page, *, force_next_code: bool = False) -> bool:
+    if not await _wait_for_totp_input(page):
+        logger.error("Could not find Epic authenticator 2FA code input after waiting")
+        return False
+
+    await _clear_totp_entry(page)
+
     code = await _current_totp_code(page, force_next_window=force_next_code)
     if not code:
         logger.error(
@@ -261,12 +267,6 @@ async def submit_totp_challenge(page: Page, *, force_next_code: bool = False) ->
             "generated. Set EPIC_TOTP_SECRET to a valid base32 authenticator secret."
         )
         return False
-
-    if not await _wait_for_totp_input(page):
-        logger.error("Could not find Epic authenticator 2FA code input after waiting")
-        return False
-
-    await _clear_totp_entry(page)
 
     selectors = TOTP_INPUT_SELECTORS
     if await _page_has_mfa_signal(page):
