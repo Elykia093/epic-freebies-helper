@@ -846,3 +846,17 @@
 - 处理结果：
   - `submit_totp_challenge` 支持提交前回调。
   - 登录认证在点击 fresh TOTP 前清理旧的可恢复 MFA 错误，避免 stale `mfa_code_invalid` 消耗后续重试额度。
+
+### 2026-07-05 MFA 页面已跳转成功时不再误判 2FA 失败
+
+- 现象：
+  - GitHub Actions run `28714352993` 中 hCaptcha 成功后，失败截图显示浏览器已经进入 Epic Account Settings 页面。
+  - 认证逻辑仍在等待下一轮 fresh TOTP，并在页面跳出 MFA 后因为找不到 2FA 输入框而抛出 `captcha_after_mfa`。
+- 根因判断：
+  - hCaptcha 完成后，Epic 可能接受上一轮 MFA 请求并跳转成功；等待新 TOTP 窗口期间页面状态会从 `/id/login/mfa` 变成账户页面。
+  - 此时“找不到 MFA 输入框”应视为 MFA 页面消失并继续观察登录 outcome，而不是认证失败。
+- 改动文件：
+  - `app/services/epic_authorization_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - fresh TOTP 提交失败时，如果当前页面已不再是 MFA 页，认证流程会回到 outcome 继续判断登录成功状态。

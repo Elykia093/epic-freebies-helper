@@ -393,6 +393,13 @@ class EpicAuthorization:
                 force_next_code=force_next_code,
                 before_submit=self._drain_retryable_mfa_errors,
             ):
+                if not self._is_mfa_page():
+                    logger.warning(
+                        "MFA page disappeared before fresh TOTP could be submitted; "
+                        "continuing to observe login outcome | current_url='{}'",
+                        self.page.url,
+                    )
+                    return
                 raise EpicAuthenticationFatalError(reason)
 
         while time.monotonic() < deadline:
