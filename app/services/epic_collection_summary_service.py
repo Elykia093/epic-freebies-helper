@@ -49,7 +49,7 @@ def _promotions_in_namespaces(
 async def _refresh_order_snapshot(agent: EpicAgent) -> set[str]:
     agent._orders = []
     agent._namespaces = []
-    await agent._check_order_history()
+    await agent._sync_order_history()
     await agent._check_orders()
     return set(agent._namespaces)
 
@@ -89,9 +89,7 @@ async def collect_epic_games_with_summary(agent: EpicAgent) -> CollectionSummary
         )
         raise EpicCollectionSummaryError(message, summary) from err
 
-    newly_claimed = _promotions_in_namespaces(
-        all_promotions, after_namespaces - before_namespaces
-    )
+    newly_claimed = _promotions_in_namespaces(all_promotions, after_namespaces - before_namespaces)
     failed_promotions = _unique_promotions(
         [
             promotion

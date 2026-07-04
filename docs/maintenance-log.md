@@ -860,3 +860,16 @@
   - `docs/maintenance-log.md`
 - 处理结果：
   - fresh TOTP 提交失败时，如果当前页面已不再是 MFA 页，认证流程会回到 outcome 继续判断登录成功状态。
+
+### 2026-07-05 订单快照刷新改用当前订单同步方法
+
+- 现象：
+  - GitHub Actions run `28714635991` 已经完成登录、账号校验和 Epic store session 验证。
+  - 领取汇总前刷新订单快照时抛出 `AttributeError: 'EpicAgent' object has no attribute '_check_order_history'`。
+- 根因判断：
+  - `EpicAgent` 当前保留的是 `_sync_order_history()` 和 `_check_orders()`；summary 服务仍引用旧的 `_check_order_history()` 名称。
+- 改动文件：
+  - `app/services/epic_collection_summary_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 订单快照刷新改为调用 `_sync_order_history()`，随后继续由 `_check_orders()` 同步 namespace 和 promotions。
