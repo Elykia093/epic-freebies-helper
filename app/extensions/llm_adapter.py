@@ -319,6 +319,17 @@ def _extract_drag_points_from_value(value: Any) -> tuple[dict[str, int], dict[st
                 return points
 
     if isinstance(value, list):
+        if len(value) >= 2:
+            start_point = _coerce_point(value[0])
+            end_point = _coerce_point(value[1])
+            if (
+                start_point
+                and end_point
+                and not _coerce_area_box(value[0])
+                and not _coerce_area_box(value[1])
+            ):
+                return start_point, end_point
+
         for item in value:
             points = _extract_drag_points_from_value(item)
             if points:
@@ -705,6 +716,18 @@ def _coerce_payload_for_schema(payload: dict[str, Any], schema: Any, text: str) 
                     challenge_prompt=challenge_prompt,
                     inferred_rule=inferred_rule,
                 )
+
+        if not normalized_drag:
+            answer_payload = payload.get("answer")
+            if answer_payload is not None:
+                extracted_drag = _extract_drag_points_from_value(answer_payload)
+                if extracted_drag:
+                    normalized_drag = _build_drag_payload(
+                        extracted_drag[0],
+                        extracted_drag[1],
+                        challenge_prompt=challenge_prompt,
+                        inferred_rule=inferred_rule,
+                    )
 
         if not normalized_drag:
             extracted_drag = _extract_drag_points_from_text(text)

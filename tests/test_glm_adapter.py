@@ -94,6 +94,20 @@ def test_drag_source_coordinates_are_converted_to_paths():
     assert challenge.paths[0].end_point.model_dump() == {"x": 960, "y": 545}
 
 
+def test_drag_answer_two_point_arrays_are_converted_to_paths():
+    payload = {"answer": [[755, 507], [1067, 616]]}
+    text = json.dumps(payload)
+
+    coerced = _coerce_payload_for_schema(
+        _normalize_glm_payload(payload), ImageDragDropChallenge, text
+    )
+    challenge = ImageDragDropChallenge(**coerced)
+
+    assert challenge.challenge_prompt == ""
+    assert challenge.paths[0].start_point.model_dump() == {"x": 755, "y": 507}
+    assert challenge.paths[0].end_point.model_dump() == {"x": 1067, "y": 616}
+
+
 def test_router_answer_single_select_is_converted_to_challenge_type():
     text = '{"answer":"image_label_single_select"}'
 

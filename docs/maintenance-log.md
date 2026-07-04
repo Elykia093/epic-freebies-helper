@@ -795,3 +795,20 @@
   - 同页重试前会清空可见码格，避免旧验证码残留或叠加输入。
   - `mfa_code_invalid` 改为可恢复错误，会在 MFA 页面用新验证码重试；连续失败后才明确提示检查 `EPIC_TOTP_SECRET` 和运行主机时间。
   - TOTP 提交后不再清空新产生的登录错误队列，避免丢失 Epic MFA 接口的真实反馈。
+
+### 2026-07-05 GLM 拖拽题 answer 点对数组兼容
+
+- 现象：
+  - GitHub Actions run `28711982606` 未进入 TOTP 阶段，而是在登录 hCaptcha 阶段连续返回 `captcha_invalid`。
+  - 日志中出现 GLM 结构化解析警告：`ImageDragDropChallenge` 缺少 `challenge_prompt` / `paths`，原始输入为 `{"answer": [[755, 507], [1067, 616]]}`。
+- 根因判断：
+  - 现有 GLM 兼容层已覆盖 `source_coordinates` / `target_coordinates`、裸 CSV 和若干文本拖拽格式，但没有在拖拽 schema 已知时把 `answer` 的两个点数组转成 `paths`。
+  - 该格式不能在 schema 未知阶段直接归一化，否则可能把 area-select 的两个矩形框误判成拖拽点。
+- 改动文件：
+  - `app/extensions/llm_adapter.py`
+  - `tests/test_glm_adapter.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 在目标 schema 包含 `paths` 时，支持把 `answer: [[x1, y1], [x2, y2]]` 转换为 hCaptcha 需要的拖拽路径。
+  - 转换时排除 4 值矩形框，避免影响 area-select 的 bbox 归一化。
+  - 追加对应 GLM adapter 回归样例；由于本仓库规则禁止执行测试，本次只做静态验证。
