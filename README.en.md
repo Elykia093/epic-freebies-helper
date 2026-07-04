@@ -1,5 +1,3 @@
-> GitHub Actions 现在支持可选的验证器 App 2FA：将验证器二维码对应的 base32 secret 配置为 `EPIC_TOTP_SECRET`，工作流运行时会自动生成 6 位 TOTP 验证码。邮箱 / 短信 2FA 仍不支持。如需发送 Telegram Bot 通知，请配置 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID`；通知会包含运行状态、工作流上下文、本周游戏、本次新领取、之前已领取的游戏。失败运行还会包含未确认成功的游戏，以及精简后的主要失败原因。
-
 <div align="center">
   <h1>Epic Weekly Free Games Helper</h1>
   <p>A fully free Epic weekly free-games claimer powered by GitHub Actions.</p>
@@ -61,7 +59,7 @@ The GLM path is primarily recommended for the following advantages:
 ## Prerequisites
 
 - Your Epic account email and password.
-- Epic account email / SMS 2FA must be disabled; if you use authenticator-app 2FA, configure `EPIC_TOTP_SECRET`.
+- Epic account 2FA must be disabled (email, SMS, or authenticator app).
 - A GLM account with `GLM_API_KEY` prepared for captcha solving.
 
 ---
