@@ -28,6 +28,7 @@ class CompletedOrder(BaseModel):
 
 class PromotionGame(BaseModel):
     title: str
+    title_original: str = ""
     id: str
     namespace: str
     description: str

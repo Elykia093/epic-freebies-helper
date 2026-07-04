@@ -57,6 +57,19 @@ def get_promotions() -> List[PromotionGame]:
     promotions: List[PromotionGame] = []
 
     resp = httpx.get(URL_PROMOTIONS, params={"local": "zh-CN"})
+    original_titles: dict[str, str] = {}
+
+    try:
+        original_resp = httpx.get(URL_PROMOTIONS, params={"local": "en-US"})
+        original_data = original_resp.json()
+        original_titles = {
+            e.get("namespace") or e.get("id"): e.get("title", "")
+            for e in original_data["data"]["Catalog"]["searchStore"]["elements"]
+        }
+    except Exception as err:
+        logger.warning(
+            "Failed to load original promotion titles | error_type={}", type(err).__name__
+        )
 
     try:
         data = resp.json()
@@ -105,6 +118,7 @@ def get_promotions() -> List[PromotionGame]:
             continue
 
         logger.info(e["url"])
+        e["title_original"] = original_titles.get(e.get("namespace") or e.get("id"), "")
         promotions.append(PromotionGame(**e))
 
     return promotions

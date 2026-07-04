@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 import httpx
 from loguru import logger
@@ -12,19 +10,9 @@ from models import PromotionGame
 from services.epic_collection_summary_service import CollectionSummary
 from services.epic_games_service import get_promotions
 
-RUN_TIMEZONE = ZoneInfo("Asia/Shanghai")
-
 
 def _env(name: str) -> str:
     return os.getenv(name, "").strip()
-
-
-def _github_run_url() -> str:
-    repository = _env("GITHUB_REPOSITORY")
-    run_id = _env("GITHUB_RUN_ID")
-    if not repository or not run_id:
-        return ""
-    return f"https://github.com/{repository}/actions/runs/{run_id}"
 
 
 def _format_error(error: Exception | str | None) -> str:
@@ -50,7 +38,11 @@ def _format_error(error: Exception | str | None) -> str:
 
 
 def _format_game_title(game: PromotionGame) -> str:
-    return game.title or game.url or "Unknown"
+    title = game.title or game.url or "Unknown"
+    original_title = game.title_original.strip()
+    if original_title and original_title != title:
+        return f"{title}（{original_title}）"
+    return title
 
 
 def _format_games(games: list[PromotionGame]) -> str:
@@ -65,36 +57,6 @@ def _format_games(games: list[PromotionGame]) -> str:
     return "\n".join(lines)
 
 
-def _runtime_lines() -> list[str]:
-    run_time = datetime.now(RUN_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
-    lines = [
-        f"运行时间：{run_time} Asia/Shanghai",
-    ]
-
-    if workflow := _env("GITHUB_WORKFLOW"):
-        lines.append(f"工作流：{workflow}")
-
-    if event_name := _env("GITHUB_EVENT_NAME"):
-        lines.append(f"触发方式：{event_name}")
-
-    if ref_name := _env("GITHUB_REF_NAME"):
-        lines.append(f"分支：{ref_name}")
-
-    if sha := _env("GITHUB_SHA"):
-        lines.append(f"提交：{sha[:7]}")
-
-    run_number = _env("GITHUB_RUN_NUMBER")
-    run_attempt = _env("GITHUB_RUN_ATTEMPT")
-    if run_number:
-        suffix = f" / attempt {run_attempt}" if run_attempt else ""
-        lines.append(f"运行编号：#{run_number}{suffix}")
-
-    if run_url := _github_run_url():
-        lines.extend(["运行链接：", run_url])
-
-    return lines
-
-
 def build_telegram_run_message(success: bool, error: Exception | str | None = None) -> str:
     summary = CollectionSummary(error_message=_format_error(error) if not success else "")
     return build_telegram_summary_message(summary)
@@ -106,7 +68,6 @@ def build_telegram_summary_message(summary: CollectionSummary) -> str:
         "Epic 周免领取结果",
         "",
         f"运行状态：{'成功' if success else '失败'}",
-        *_runtime_lines(),
         "",
         "本周游戏：",
         _format_games(summary.all_promotions),
@@ -145,10 +106,7 @@ def failure_summary_from_exception(err: Exception) -> CollectionSummary:
     summary = getattr(err, "summary", None)
     if not isinstance(summary, CollectionSummary):
         promotions = _safe_current_promotions()
-        summary = CollectionSummary(
-            all_promotions=promotions,
-            failed_promotions=promotions,
-        )
+        summary = CollectionSummary(all_promotions=promotions, failed_promotions=promotions)
 
     if not summary.error_message:
         summary.error_message = _format_error(err)

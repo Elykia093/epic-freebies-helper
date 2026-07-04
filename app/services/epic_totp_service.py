@@ -9,6 +9,15 @@ import pyotp
 from loguru import logger
 from playwright.async_api import Page, expect
 
+TOTP_INPUT_SELECTORS = (
+    "input[autocomplete='one-time-code']",
+    "input[name='code']",
+    "input[id*='code']",
+    "input[inputmode='numeric']",
+    "input[type='tel']",
+)
+GENERIC_TEXT_INPUT_SELECTORS = ("input[type='text']",)
+
 
 def _totp_secret_value() -> str | None:
     secret = os.getenv("EPIC_TOTP_SECRET", "").replace(" ", "").strip()
@@ -35,7 +44,7 @@ async def _current_totp_code(page: Page) -> str | None:
         return None
 
 
-async def _select_authenticator_mfa_method(page: Page) -> None:
+async def _select_authenticator_mfa_method(page: Page) -> bool:
     with suppress(Exception):
         clicked = await page.evaluate(
             """
@@ -68,6 +77,71 @@ async def _select_authenticator_mfa_method(page: Page) -> None:
         )
         if clicked:
             await page.wait_for_timeout(1000)
+            return True
+    return False
+
+
+async def _page_has_mfa_signal(page: Page) -> bool:
+    with suppress(Exception):
+        return await page.evaluate(
+            """
+            () => {
+              const text = (document.body?.innerText || '').toLowerCase();
+              const href = window.location.href.toLowerCase();
+              const markers = [
+                'two-factor',
+                'two factor',
+                'authentication code',
+                'verification code',
+                'security code',
+                'authenticator',
+                'enter code',
+              ];
+              return href.includes('/id/login/mfa') ||
+                markers.some((marker) => text.includes(marker));
+            }
+            """
+        )
+    return False
+
+
+async def _visible_indexes(page: Page, selector: str, limit: int) -> list[int]:
+    locator = page.locator(selector)
+    indexes: list[int] = []
+    count = await locator.count()
+    for index in range(count):
+        with suppress(Exception):
+            if await locator.nth(index).is_visible(timeout=250):
+                indexes.append(index)
+                if len(indexes) >= limit:
+                    break
+    return indexes
+
+
+async def _has_visible_totp_input(page: Page, selectors: tuple[str, ...]) -> bool:
+    for selector in selectors:
+        if await _visible_indexes(page, selector, limit=1):
+            return True
+    return False
+
+
+async def _wait_for_totp_input(page: Page, timeout_ms: int = 20000) -> bool:
+    deadline = time.monotonic() + timeout_ms / 1000
+
+    while time.monotonic() < deadline:
+        await _select_authenticator_mfa_method(page)
+
+        if await _has_visible_totp_input(page, TOTP_INPUT_SELECTORS):
+            return True
+
+        if await _page_has_mfa_signal(page) and await _has_visible_totp_input(
+            page, GENERIC_TEXT_INPUT_SELECTORS
+        ):
+            return True
+
+        await page.wait_for_timeout(500)
+
+    return False
 
 
 async def submit_totp_challenge(page: Page) -> bool:
@@ -79,29 +153,27 @@ async def submit_totp_challenge(page: Page) -> bool:
         )
         return False
 
-    await _select_authenticator_mfa_method(page)
+    if not await _wait_for_totp_input(page):
+        logger.error("Could not find Epic authenticator 2FA code input after waiting")
+        return False
 
-    selectors = (
-        "input[autocomplete='one-time-code']",
-        "input[name='code']",
-        "input[id*='code']",
-        "input[inputmode='numeric']",
-        "input[type='tel']",
-        "input[type='text']",
-    )
+    selectors = TOTP_INPUT_SELECTORS
+    if await _page_has_mfa_signal(page):
+        selectors += GENERIC_TEXT_INPUT_SELECTORS
 
     filled = False
     for selector in selectors:
         locator = page.locator(selector)
         try:
-            count = await locator.count()
-            if not count:
+            indexes = await _visible_indexes(page, selector, limit=max(len(code), 1))
+            if not indexes:
                 continue
-            if count >= 6:
-                for index, digit in enumerate(code):
+
+            if len(indexes) >= len(code):
+                for index, digit in zip(indexes, code):
                     await locator.nth(index).fill(digit, timeout=1000)
             else:
-                field = locator.first
+                field = locator.nth(indexes[0])
                 await expect(field).to_be_visible(timeout=2000)
                 await field.fill(code, timeout=2000)
             filled = True

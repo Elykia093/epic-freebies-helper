@@ -715,3 +715,48 @@
   - 如果 8 秒内仍拿不到导航登录态，会访问 Epic 账号订单接口 `ajaxGetOrderHistory` 做后备会话探针。
   - 只有后备接口返回合法 JSON 且包含 `orders` 列表时才视为已登录；未登录、重定向、页面错误或非 JSON 响应仍会继续失败，不会把匿名页面误判成有效会话。
   - 领取前订单同步复用同一订单接口解析逻辑，并保留已有 `Device not supported`、`ADD TO LIBRARY`、结账 hCaptcha 和订单历史最终确认逻辑。
+
+### 2026-07-04 Telegram 通知运行上下文精简
+
+- 现象：
+  - 用户希望 Telegram 通知不再包含运行时间、工作流、触发方式、分支、提交、运行编号和运行链接等 GitHub Actions 运行上下文字段。
+- 根因判断：
+  - 通知模板默认把 `_runtime_lines()` 插入到运行状态之后，导致每次通知都附带不需要的 CI 元信息。
+- 改动文件：
+  - `app/services/telegram_notification_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - Telegram 通知保留运行状态、本周游戏、本次新领取、之前已领取、未确认成功和失败原因。
+  - 移除了运行上下文字段构建函数及其 datetime/zoneinfo 依赖。
+
+### 2026-07-04 Telegram 通知标题显示中文与原始名
+
+- 现象：
+  - 用户希望 Telegram 游戏标题显示为 `中文名（原始名）`，而不是只显示当前本地化标题。
+- 根因判断：
+  - 当前促销接口只按 `zh-CN` 拉取数据，`PromotionGame.title` 缺少可用于通知展示的原始英文标题。
+- 改动文件：
+  - `app/models.py`
+  - `app/services/epic_games_service.py`
+  - `app/services/telegram_notification_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 促销抓取额外读取 `en-US` 标题，并写入 `PromotionGame.title_original`。
+  - Telegram 通知优先显示 `中文名（原始名）`；如果两者相同或原始名缺失，则只显示一次标题。
+
+### 2026-07-04 Epic TOTP 输入框等待
+
+- 现象：
+  - GitHub Actions run `28706101971` 在 `Run Epic Awesome Gamer` 阶段失败。
+  - 日志先出现 `captcha_invalid`，随后 Epic 登录接口返回 `two_factor_authentication.required`。
+  - TOTP 逻辑已进入提交路径，但页面截图仍停在密码提交 loading 状态，代码立即报 `Could not find Epic authenticator 2FA code input`。
+- 根因判断：
+  - Epic 后端返回需要 authenticator 2FA 的时间可能早于前端 MFA 页面和验证码输入框渲染完成。
+  - 旧逻辑收到 2FA 错误后立刻查找输入框，没有等待 MFA 页面信号，导致在前端过渡期间误判为不可处理。
+- 改动文件：
+  - `app/services/epic_totp_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - TOTP 提交前会轮询 MFA 页面信号和可见验证码输入框，必要时先选择 authenticator 方法。
+  - 只有等待后仍找不到输入框时，才终止本次认证并输出更准确的错误日志。
+  - 填码时只使用可见输入框；通用文本输入框仅在页面明确像 MFA 页面时作为后备，避免误填密码页或其他表单。
