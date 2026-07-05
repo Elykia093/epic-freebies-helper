@@ -38,7 +38,7 @@ CHALLENGE_PROMPT_ALIASES = (
 
 POINTS_ALIASES = ("points", "point", "coordinates", "Coordinates")
 
-PATHS_ALIASES = ("paths", "path", "coordinates", "Coordinates")
+PATHS_ALIASES = ("paths", "path", "coordinates", "Coordinates", "src")
 
 GLM_VISUAL_COORDINATE_INSTRUCTION = (
     "For image coordinate challenges, read the gray coordinate grid printed on the image. "
@@ -319,16 +319,9 @@ def _extract_drag_points_from_value(value: Any) -> tuple[dict[str, int], dict[st
                 return points
 
     if isinstance(value, list):
-        if len(value) >= 2:
-            start_point = _coerce_point(value[0])
-            end_point = _coerce_point(value[1])
-            if (
-                start_point
-                and end_point
-                and not _coerce_area_box(value[0])
-                and not _coerce_area_box(value[1])
-            ):
-                return start_point, end_point
+        sequence_points = _extract_drag_points_from_sequence(value)
+        if sequence_points:
+            return sequence_points
 
         for item in value:
             points = _extract_drag_points_from_value(item)
@@ -344,6 +337,26 @@ def _extract_drag_points_from_value(value: Any) -> tuple[dict[str, int], dict[st
         return _extract_drag_points_from_text(value)
 
     return None
+
+
+def _extract_drag_points_from_sequence(
+    value: list[Any],
+) -> tuple[dict[str, int], dict[str, int]] | None:
+    points: list[dict[str, int]] = []
+    for item in value:
+        with suppress(Exception):
+            if _coerce_area_box(item):
+                continue
+        point = None
+        with suppress(Exception):
+            point = _coerce_point(item)
+        if point:
+            points.append(point)
+
+    if len(points) < 2:
+        return None
+
+    return points[0], points[-1]
 
 
 def _build_drag_points_pair(

@@ -887,3 +887,19 @@
 - 处理结果：
   - 检测到可见 hCaptcha、captcha 求解完成/失败、TOTP 提交和 MFA 页面跳转时，会延长本轮 outcome 等待窗口。
   - 单轮登录仍有 10 分钟上限，避免无限等待。
+
+### 2026-07-05 GLM 拖拽题 src 多点路径兼容
+
+- 现象：
+  - GitHub Actions run `28741723192` 仍在认证阶段失败。
+  - 登录 hCaptcha 第三轮 `image_drag_multi` 中出现结构化解析错误：`ImageDragDropChallenge` 缺少 `challenge_prompt` / `paths`，原始输入形态为 `{"src": [[x, y], ...]}`。
+- 根因判断：
+  - GLM 有时把拖拽轨迹放在 `src` 字段里，并返回多个路径点。
+  - 现有兼容层只把 `paths/path/coordinates/Coordinates` 当作拖拽路径别名，未覆盖 `src`，导致 payload 没有被转换成 hCaptcha 需要的 `paths` schema。
+- 改动文件：
+  - `app/extensions/llm_adapter.py`
+  - `tests/test_glm_adapter.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 拖拽路径别名新增 `src`，多点路径会取首尾点生成 `start_point` / `end_point`。
+  - 追加 GLM adapter 回归样例；由于本仓库规则禁止执行测试，本次只做静态验证。
