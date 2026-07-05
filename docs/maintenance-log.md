@@ -873,3 +873,17 @@
   - `docs/maintenance-log.md`
 - 处理结果：
   - 订单快照刷新改为调用 `_sync_order_history()`，随后继续由 `_check_orders()` 同步 namespace 和 promotions。
+
+### 2026-07-05 登录 hCaptcha/TOTP 有进展时续期 outcome 等待窗口
+
+- 现象：
+  - GitHub Actions run `28714880043` 在登录 hCaptcha 多轮失败、CSRF 刷新和 MFA 后置验证码后耗尽 180 秒 outcome 窗口。
+  - 最后一轮 fresh TOTP 已提交，但 2 秒后认证循环按旧 deadline 超时退出。
+- 根因判断：
+  - outcome 窗口只按进入登录流程的固定时间计算；hCaptcha 求解、TOTP 等待新窗口和 fresh code 提交都没有给后续 Epic 响应续期。
+- 改动文件：
+  - `app/services/epic_authorization_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 检测到可见 hCaptcha、captcha 求解完成/失败、TOTP 提交和 MFA 页面跳转时，会延长本轮 outcome 等待窗口。
+  - 单轮登录仍有 10 分钟上限，避免无限等待。

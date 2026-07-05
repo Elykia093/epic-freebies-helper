@@ -357,13 +357,27 @@ class EpicAuthorization:
         raise PlaywrightTimeoutError("Timed out navigating to Epic claim page")
 
     async def _await_login_outcome(
-        self, point_url: str, agent: AgentV, timeout_seconds: int = 180
+        self, point_url: str, agent: AgentV, timeout_seconds: int = 300
     ) -> None:
-        deadline = time.monotonic() + timeout_seconds
+        started_at = time.monotonic()
+        deadline = started_at + timeout_seconds
+        max_deadline = started_at + 600
         totp_attempts = 0
         max_totp_attempts = 3
         last_captcha_totp_refresh_at = 0.0
         captcha_totp_refresh_cooldown = 8.0
+
+        def extend_deadline(reason: str, seconds: int = 120) -> None:
+            nonlocal deadline
+
+            new_deadline = min(time.monotonic() + seconds, max_deadline)
+            if new_deadline > deadline:
+                deadline = new_deadline
+                logger.debug(
+                    "Extended Epic login outcome wait after {} | seconds_remaining={:.1f}",
+                    reason,
+                    max(deadline - time.monotonic(), 0),
+                )
 
         async def submit_fresh_totp(reason: str) -> None:
             nonlocal totp_attempts
@@ -399,8 +413,10 @@ class EpicAuthorization:
                         "continuing to observe login outcome | current_url='{}'",
                         self.page.url,
                     )
+                    extend_deadline("mfa-page-disappeared", 60)
                     return
                 raise EpicAuthenticationFatalError(reason)
+            extend_deadline("totp-submit", 120)
 
         while time.monotonic() < deadline:
             if not self._login_error_signal.empty():
@@ -453,15 +469,18 @@ class EpicAuthorization:
                     "continuing | current_url='{}'",
                     self.page.url,
                 )
+                extend_deadline("captcha-visible", 180)
                 challenge_solved = False
                 try:
                     await agent.wait_for_challenge()
                     challenge_solved = True
+                    extend_deadline("captcha-solved", 120)
                 except Exception as err:
                     logger.warning(
                         "Login captcha solve attempt failed during authentication outcome | err={!r}",
                         err,
                     )
+                    extend_deadline("captcha-attempt", 90)
 
                 if challenge_solved and self._is_mfa_page():
                     now = time.monotonic()
@@ -611,7 +630,7 @@ class EpicAuthorization:
             # Active hCaptcha checkbox
             await self.page.click("#sign-in")
 
-            await self._await_login_outcome(point_url, agent, timeout_seconds=180)
+            await self._await_login_outcome(point_url, agent, timeout_seconds=420)
             logger.success("Login success")
 
             if self._needs_mfa_setup_prompt() and not await self._dismiss_mfa_setup_prompt(
