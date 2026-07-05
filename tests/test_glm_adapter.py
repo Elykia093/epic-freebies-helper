@@ -122,6 +122,34 @@ def test_drag_src_point_path_is_converted_to_paths():
     assert challenge.paths[0].end_point.model_dump() == {"x": 980, "y": 770}
 
 
+def test_drag_steps_are_converted_to_paths():
+    payload = {"steps": [{"from": {"x": 191, "y": 633}, "to": {"x": 1103, "y": 633}}]}
+    text = json.dumps(payload)
+
+    coerced = _coerce_payload_for_schema(
+        _normalize_glm_payload(payload), ImageDragDropChallenge, text
+    )
+    challenge = ImageDragDropChallenge(**coerced)
+
+    assert challenge.challenge_prompt == ""
+    assert challenge.paths[0].start_point.model_dump() == {"x": 191, "y": 633}
+    assert challenge.paths[0].end_point.model_dump() == {"x": 1103, "y": 633}
+
+
+def test_drag_moves_are_converted_to_paths():
+    payload = {"moves": [{"start": [191, 770], "end": [1103, 770]}]}
+    text = json.dumps(payload)
+
+    coerced = _coerce_payload_for_schema(
+        _normalize_glm_payload(payload), ImageDragDropChallenge, text
+    )
+    challenge = ImageDragDropChallenge(**coerced)
+
+    assert challenge.challenge_prompt == ""
+    assert challenge.paths[0].start_point.model_dump() == {"x": 191, "y": 770}
+    assert challenge.paths[0].end_point.model_dump() == {"x": 1103, "y": 770}
+
+
 def test_router_answer_single_select_is_converted_to_challenge_type():
     text = '{"answer":"image_label_single_select"}'
 

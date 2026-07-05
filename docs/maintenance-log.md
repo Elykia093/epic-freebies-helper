@@ -903,3 +903,18 @@
 - 处理结果：
   - 拖拽路径别名新增 `src`，多点路径会取首尾点生成 `start_point` / `end_point`。
   - 追加 GLM adapter 回归样例；由于本仓库规则禁止执行测试，本次只做静态验证。
+
+### 2026-07-05 GLM 拖拽题 steps / moves 路径兼容
+
+- 现象：
+  - GitHub Actions run `28742690481` 已成功完成登录、账号校验、Epic store session 验证和领取汇总。
+  - 成功日志中仍出现非阻断结构化解析警告：`ImageDragDropChallenge` 缺少 `challenge_prompt` / `paths`，原始输入形态包含 `{"steps": [{"from": ..., "to": ...}]}` 和 `{"moves": [{"start": ..., "end": ...}]}`。
+- 根因判断：
+  - GLM 的拖拽输出字段仍会漂移；现有兼容层已能解析内部的 `from/to` 与 `start/end`，但外层没有把 `steps` / `moves` 当作路径容器别名。
+- 改动文件：
+  - `app/extensions/llm_adapter.py`
+  - `tests/test_glm_adapter.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 拖拽路径别名新增 `steps` / `moves`，复用现有 `from/to` 与 `start/end` 归一化。
+  - 追加对应 GLM adapter 回归样例；由于本仓库规则禁止执行测试，本次只做静态验证。

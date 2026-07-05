@@ -38,7 +38,7 @@ CHALLENGE_PROMPT_ALIASES = (
 
 POINTS_ALIASES = ("points", "point", "coordinates", "Coordinates")
 
-PATHS_ALIASES = ("paths", "path", "coordinates", "Coordinates", "src")
+PATHS_ALIASES = ("paths", "path", "coordinates", "Coordinates", "src", "steps", "moves")
 
 GLM_VISUAL_COORDINATE_INSTRUCTION = (
     "For image coordinate challenges, read the gray coordinate grid printed on the image. "
