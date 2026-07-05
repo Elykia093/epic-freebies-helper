@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from html import escape
 
 import httpx
 from loguru import logger
@@ -45,15 +46,21 @@ def _format_game_title(game: PromotionGame) -> str:
     return title
 
 
+def _format_game_link(game: PromotionGame) -> str:
+    title = escape(_format_game_title(game), quote=True)
+    url = game.url.strip()
+    if not url:
+        return title
+    return f'<a href="{escape(url, quote=True)}">{title}</a>'
+
+
 def _format_games(games: list[PromotionGame]) -> str:
     if not games:
         return "无"
 
     lines = []
     for game in games:
-        title = _format_game_title(game)
-        url = game.url or ""
-        lines.append(f"- {title}" + (f"\n  {url}" if url else ""))
+        lines.append(f"- {_format_game_link(game)}")
     return "\n".join(lines)
 
 
@@ -83,7 +90,9 @@ def build_telegram_summary_message(summary: CollectionSummary) -> str:
         sections.extend(["", "未确认成功：", _format_games(summary.failed_promotions)])
 
     if summary.error_message:
-        sections.extend(["", "失败原因：", _format_error(summary.error_message)])
+        sections.extend(
+            ["", "失败原因：", escape(_format_error(summary.error_message), quote=True)]
+        )
 
     message = "\n".join(sections)
     if len(message) > 3900:
@@ -123,6 +132,7 @@ async def send_collection_summary_to_telegram(summary: CollectionSummary) -> Non
     payload: dict[str, object] = {
         "chat_id": chat_id,
         "text": build_telegram_summary_message(summary),
+        "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
 

@@ -918,3 +918,17 @@
 - 处理结果：
   - 拖拽路径别名新增 `steps` / `moves`，复用现有 `from/to` 与 `start/end` 归一化。
   - 追加对应 GLM adapter 回归样例；由于本仓库规则禁止执行测试，本次只做静态验证。
+
+### 2026-07-06 Telegram 无中文名游戏改为标题超链接
+
+- 现象：
+  - Telegram 汇总里没有中文名的游戏只显示英文标题，并在下一行展示裸 URL，阅读和点击都不够直观。
+- 根因判断：
+  - 当前游戏列表格式化逻辑把标题和 URL 拆成两行，发送 payload 也未启用 Telegram `parse_mode`，因此无法渲染标题链接。
+- 改动文件：
+  - `app/services/telegram_notification_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 游戏条目改为 HTML 标题超链接，保留 `中文名（原始名）` 的显示规则。
+  - Telegram 发送 payload 启用 `parse_mode=HTML`，并对游戏标题、URL 和失败原因做 HTML 转义。
+  - 本次未执行 pytest；已做静态检查和格式化输出冒烟。
