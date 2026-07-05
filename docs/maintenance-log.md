@@ -932,3 +932,17 @@
   - 游戏条目改为 HTML 标题超链接，保留 `中文名（原始名）` 的显示规则。
   - Telegram 发送 payload 启用 `parse_mode=HTML`，并对游戏标题、URL 和失败原因做 HTML 转义。
   - 本次未执行 pytest；已做静态检查和格式化输出冒烟。
+
+### 2026-07-06 Epic 促销接口中文 locale 参数修正
+
+- 现象：
+  - GitHub Actions 已成功发送 Telegram 汇总，但游戏标题仍然显示英文，没有显示 Epic 已提供的中文本地化标题。
+- 根因判断：
+  - 促销抓取请求使用了 `local=zh-CN`，Epic 接口实际识别的是 `locale=zh-CN`。
+  - 对比同一接口可见：`local=zh-CN` 返回英文标题，而 `locale=zh-CN` 能返回《幽灵行者 2》、`失落城堡: 遗迹守护者` 等中文标题。
+- 改动文件：
+  - `app/services/epic_games_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 中文促销请求改为 `locale=zh-CN`。
+  - 原始英文标题请求改为 `locale=en-US`，继续写入 `PromotionGame.title_original` 供 Telegram 显示 `中文名（原始名）`。
