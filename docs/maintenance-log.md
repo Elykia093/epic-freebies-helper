@@ -946,3 +946,22 @@
 - 处理结果：
   - 中文促销请求改为 `locale=zh-CN`。
   - 原始英文标题请求改为 `locale=en-US`，继续写入 `PromotionGame.title_original` 供 Telegram 显示 `中文名（原始名）`。
+
+### 2026-07-06 登录 hCaptcha 后置 MFA 刷新不再过早自杀
+
+- 现象：
+  - GitHub Actions run `28749794111` 在登录阶段连续完成 hCaptcha 和 TOTP 交互，但最新一次仍停在 `/id/login/mfa`。
+  - 日志显示多次 `Challenge success` 和 `Submitted Epic authenticator 2FA code` 后，流程因 `captcha_after_mfa` 达到 3 次 TOTP 提交上限而中止。
+  - 该失败不是旧的 `Timed out waiting for Epic login outcome` 直接超时，而是验证码拖慢 MFA 后的重试额度耗尽。
+- 根因判断：
+  - `captcha_after_mfa` 代表 hCaptcha 可能拖过了上一轮 TOTP 窗口，并不等同于 Epic 明确拒绝 TOTP secret。
+  - 旧逻辑把 captcha 驱动的 fresh TOTP 和真实 `mfa_code_invalid` 共用 3 次上限，导致 hCaptcha 仍有进展时过早判定 2FA 致命失败。
+  - hCaptcha 成功后页面仍短暂停留在 MFA URL 时，旧逻辑会立即补交 fresh TOTP，没有先等待 Epic 返回成功跳转、MFA 错误或下一轮验证码状态。
+- 改动文件：
+  - `app/services/epic_authorization_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 登录 outcome 单轮硬上限提升到 20 分钟，覆盖 GitHub Actions 中多轮 hCaptcha 的真实耗时。
+  - `mfa_code_invalid` 单独累计 3 次后才提示检查 `EPIC_TOTP_SECRET` 和主机时间；captcha 后置刷新可最多提交 6 次 TOTP，避免把验证码耗时误判为 secret 错误。
+  - hCaptcha 在 MFA 页完成后会先等待短暂 settle 窗口，若已有登录成功、MFA 错误、页面跳转或新验证码信号，则交回主循环处理；无新信号且仍停在 MFA 页时才提交 fresh TOTP。
+  - 本次未执行测试或真实登录；已做静态核查，需用下一次 GitHub Actions 运行验证登录链路是否闭合。

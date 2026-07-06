@@ -361,9 +361,12 @@ class EpicAuthorization:
     ) -> None:
         started_at = time.monotonic()
         deadline = started_at + timeout_seconds
-        max_deadline = started_at + 600
+        hard_timeout_seconds = max(timeout_seconds, 1200)
+        max_deadline = started_at + hard_timeout_seconds
         totp_attempts = 0
-        max_totp_attempts = 3
+        invalid_totp_rejections = 0
+        max_totp_attempts = 6
+        max_invalid_totp_rejections = 3
         last_captcha_totp_refresh_at = 0.0
         captcha_totp_refresh_cooldown = 8.0
 
@@ -380,21 +383,24 @@ class EpicAuthorization:
                 )
 
         async def submit_fresh_totp(reason: str) -> None:
-            nonlocal totp_attempts
+            nonlocal invalid_totp_rejections, totp_attempts
 
-            if totp_attempts >= max_totp_attempts:
-                if self._is_mfa_code_invalid_error(reason):
+            if self._is_mfa_code_invalid_error(reason):
+                invalid_totp_rejections += 1
+                if invalid_totp_rejections >= max_invalid_totp_rejections:
                     logger.error(
                         "Epic rejected {} authenticator TOTP submission(s) as invalid "
                         "or expired. Verify EPIC_TOTP_SECRET and the host clock.",
-                        totp_attempts,
+                        invalid_totp_rejections,
                     )
-                else:
-                    logger.error(
-                        "Epic still requires authenticator 2FA after {} TOTP submission(s); "
-                        "aborting. Verify EPIC_TOTP_SECRET and the host clock.",
-                        totp_attempts,
-                    )
+                    raise EpicAuthenticationFatalError(reason)
+
+            if totp_attempts >= max_totp_attempts:
+                logger.error(
+                    "Epic still requires authenticator 2FA after {} TOTP submission(s); "
+                    "aborting. Verify EPIC_TOTP_SECRET, the host clock, and captcha reliability.",
+                    totp_attempts,
+                )
                 raise EpicAuthenticationFatalError(reason)
 
             force_next_code = self._is_mfa_code_invalid_error(reason) or (
@@ -417,6 +423,30 @@ class EpicAuthorization:
                     return
                 raise EpicAuthenticationFatalError(reason)
             extend_deadline("totp-submit", 120)
+
+        async def wait_for_mfa_captcha_settle(seconds: int = 8) -> bool:
+            settle_deadline = time.monotonic() + seconds
+            while time.monotonic() < settle_deadline:
+                if not self._is_login_success_signal.empty() or not self._login_error_signal.empty():
+                    return True
+
+                if not self._is_mfa_page():
+                    logger.warning(
+                        "MFA page disappeared after captcha; continuing to observe login outcome | current_url='{}'",
+                        self.page.url,
+                    )
+                    extend_deadline("mfa-page-disappeared", 60)
+                    return True
+
+                if await self._has_visible_hcaptcha():
+                    logger.debug(
+                        "Another login captcha is visible after MFA captcha; continuing captcha handling"
+                    )
+                    return True
+
+                await self.page.wait_for_timeout(500)
+
+            return False
 
         while time.monotonic() < deadline:
             if not self._login_error_signal.empty():
@@ -483,6 +513,10 @@ class EpicAuthorization:
                     extend_deadline("captcha-attempt", 90)
 
                 if challenge_solved and self._is_mfa_page():
+                    if await wait_for_mfa_captcha_settle():
+                        await self.page.wait_for_timeout(500)
+                        continue
+
                     now = time.monotonic()
                     if now - last_captcha_totp_refresh_at >= captcha_totp_refresh_cooldown:
                         logger.warning(
