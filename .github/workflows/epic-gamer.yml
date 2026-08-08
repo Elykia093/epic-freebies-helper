@@ -103,6 +103,33 @@ jobs:
             echo "- If you later report an issue from a private fork, upload the artifact zip files because maintainers cannot access private Actions pages."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Write failure summary
+        if: failure()
+        run: |
+          if grep -Rqs -E \
+            'unable to download any more free games|wait 24 hours before trying again|free-game redemption rate limit detected' \
+            app/volumes/logs/ app/volumes/runtime/ 2>/dev/null; then
+            {
+              echo "## Claim not completed: Epic 24-hour limit"
+              echo
+              echo "本次领取未成功：Epic 已限制该账号继续领取免费游戏。"
+              echo
+              echo "Epic blocked additional free-game redemptions for the affected account. This run did not confirm a successful claim for that account."
+              echo
+              echo "Wait at least 24 hours before running the workflow again. Repeated retries during this period will not complete the claim."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## Claim not completed"
+              echo
+              echo "本次领取未完成，不能视为领取成功。"
+              echo
+              echo "The workflow failed before all available games were confirmed in the library. Do not treat this run as a successful claim."
+              echo
+              echo "Review the failed step and uploaded runtime/log artifacts for the specific cause."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Upload runtime artifacts
         if: always()
         uses: actions/upload-artifact@v7
