@@ -25,7 +25,7 @@ from accounts import get_epic_accounts_raw, mask_email, parse_multi_accounts, sw
 from services.epic_authorization_service import EpicAuthorization
 from services.browser_context import open_browser_context, resolve_headless_mode
 from services.epic_collection_summary_service import collect_epic_games_with_summary
-from services.epic_games_service import EpicAgent
+from services.epic_games_service import EpicAgent, EpicFreeGameRateLimitError
 from services.telegram_notification_service import (
     failure_summary_from_exception,
     send_collection_summary_to_telegram,
@@ -44,6 +44,20 @@ init_log(
 
 # Default timezone for scheduling operations
 TIMEZONE = timezone("Asia/Shanghai")
+RATE_LIMITED_OUTCOME = "rate_limited"
+
+
+def _is_free_game_rate_limit_error(err: Exception) -> bool:
+    current: BaseException | None = err
+    seen: set[int] = set()
+
+    while current is not None and id(current) not in seen:
+        if isinstance(current, EpicFreeGameRateLimitError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+
+    return False
 
 
 @logger.catch(reraise=True)
@@ -96,25 +110,35 @@ async def execute_browser_tasks(headless: bool | str = True, *, collect_summary:
 
 async def execute_browser_tasks_with_notification(
     headless: bool | str = True, *, account_label: str | None = None
-):
+) -> str | None:
     if configuration_error := settings.llm_configuration_error:
         logger.error(configuration_error)
         raise RuntimeError(configuration_error)
 
-    if not telegram_notifications_enabled():
+    notifications_enabled = telegram_notifications_enabled()
+    if not notifications_enabled:
         logger.debug("Telegram notification is not configured; using standard collection flow")
-        await execute_browser_tasks(headless=headless)
-        return
 
     try:
-        summary = await execute_browser_tasks(headless=headless, collect_summary=True)
-    except Exception as err:
-        await send_collection_summary_to_telegram(
-            failure_summary_from_exception(err), account_label=account_label
+        summary = await execute_browser_tasks(
+            headless=headless, collect_summary=notifications_enabled
         )
+    except Exception as err:
+        if notifications_enabled:
+            await send_collection_summary_to_telegram(
+                failure_summary_from_exception(err), account_label=account_label
+            )
+        if _is_free_game_rate_limit_error(err):
+            logger.warning(
+                "Epic 24-hour free-game limit detected; ending this run without retry. "
+                "No successful claim was confirmed for the affected account."
+            )
+            return RATE_LIMITED_OUTCOME
         raise
-    else:
+
+    if notifications_enabled:
         await send_collection_summary_to_telegram(summary, account_label=account_label)
+    return None
 
 
 async def execute_multiple_accounts(
@@ -123,6 +147,7 @@ async def execute_multiple_accounts(
     """Run collection for an explicitly enabled, fully valid multi-account list."""
     total = len(accounts)
     succeeded = 0
+    rate_limited_accounts: list[str] = []
     failed_accounts: list[str] = []
 
     for index, (email, password) in enumerate(accounts, 1):
@@ -134,24 +159,44 @@ async def execute_multiple_accounts(
         try:
             # Swap active credentials so user_data_dir and login use this account.
             swap_account(email, password)
-            await execute_browser_tasks_with_notification(
+            outcome = await execute_browser_tasks_with_notification(
                 headless=headless, account_label=masked_email
             )
-            succeeded += 1
-            logger.success("Account {}/{} completed: {}", index, total, masked_email)
+            if outcome == RATE_LIMITED_OUTCOME:
+                rate_limited_accounts.append(masked_email)
+                logger.warning(
+                    "Account {}/{} stopped by Epic's 24-hour free-game limit: {}",
+                    index,
+                    total,
+                    masked_email,
+                )
+            else:
+                succeeded += 1
+                logger.success("Account {}/{} completed: {}", index, total, masked_email)
         except Exception as err:
             failed_accounts.append(masked_email)
             logger.error("Account {}/{} failed: {} | error: {}", index, total, masked_email, err)
             # Continue to next account — don't abort the entire run
 
     logger.info("=" * 60)
-    logger.info("Multi-account run summary: {}/{} succeeded", succeeded, total)
+    logger.info(
+        "Multi-account run summary: {}/{} succeeded, {} rate-limited",
+        succeeded,
+        total,
+        len(rate_limited_accounts),
+    )
     if failed_accounts:
         logger.warning("Failed accounts: {}", ", ".join(failed_accounts))
         raise RuntimeError(
             f"{len(failed_accounts)} of {total} account(s) failed: " + ", ".join(failed_accounts)
         )
-    logger.success("All {} account(s) completed successfully", total)
+    if rate_limited_accounts:
+        logger.warning(
+            "Run ended without retry for rate-limited account(s): {}",
+            ", ".join(rate_limited_accounts),
+        )
+    else:
+        logger.success("All {} account(s) completed successfully", total)
 
 
 async def _run_accounts(headless: bool | str = True) -> None:

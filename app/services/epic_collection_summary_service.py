@@ -5,7 +5,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from models import PromotionGame
-from services.epic_games_service import EpicAgent, get_promotions
+from services.epic_games_service import EpicAgent, EpicFreeGameRateLimitError, get_promotions
 
 
 class CollectionSummary(BaseModel):
@@ -96,6 +96,15 @@ async def collect_epic_games_with_summary(agent: EpicAgent) -> CollectionSummary
     try:
         await agent.collect_epic_games()
     except Exception as err:
+        if isinstance(err, EpicFreeGameRateLimitError):
+            summary = CollectionSummary(
+                all_promotions=all_promotions,
+                previously_claimed_promotions=previously_claimed,
+                unconfirmed_promotions=pending_promotions,
+                error_message="; ".join([str(err), *summary_errors]),
+            )
+            raise EpicCollectionSummaryError(str(err), summary) from err
+
         try:
             after_namespaces = await agent.refresh_order_namespaces()
         except Exception as snapshot_err:
