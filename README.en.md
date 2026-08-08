@@ -438,19 +438,19 @@ Thanks to the original authors, maintainers, and the community work that made th
 
 ## Star History
 
-<a href="https://github.com/Ronchy2000/epic-freebies-helper/stargazers">
+<a href="https://www.star-history.com/#Ronchy2000/epic-freebies-helper&amp;Date">
   <picture>
     <source
       media="(prefers-color-scheme: dark)"
-      srcset="docs/images/star-history-dark.svg"
+      srcset="https://api.star-history.com/svg?repos=ronchy2000%2Fepic-freebies-helper&amp;type=Date&amp;theme=dark"
     />
     <source
       media="(prefers-color-scheme: light)"
-      srcset="docs/images/star-history-light.svg"
+      srcset="https://api.star-history.com/svg?repos=ronchy2000%2Fepic-freebies-helper&amp;type=Date"
     />
     <img
       alt="Star History Chart"
-      src="docs/images/star-history-light.svg"
+      src="https://api.star-history.com/svg?repos=ronchy2000%2Fepic-freebies-helper&amp;type=Date"
     />
   </picture>
 </a>

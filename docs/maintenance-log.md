@@ -1189,3 +1189,43 @@
   - 全无效多账号配置仅在备用邮箱和密码完整时回退；否则在启动浏览器前报告明确配置错误。
   - 多账号邮箱拒绝 `/`、`\`、空白和控制字符，避免 profile 路径逃逸。
   - 增加分发器回归覆盖，验证单账号直通、原始异常对象不被替换、合法回退以及无凭据快速失败。
+
+### 2026-08-08 取消仓库自更新 Star 趋势图
+
+- 现象：
+  - Star 趋势图依赖每日 GitHub Action 生成并提交 SVG，持续制造与业务无关的提交；Fork 用户也会继承这套更新工作流。
+- 根因判断：
+  - 仓库内生成方案把展示数据维护耦合到代码仓库写权限；Star History 当前 `/svg` 接口可直接提供带 CDN 缓存的动态明暗主题图，无需仓库自行更新。
+- 改动文件：
+  - `.github/workflows/update-star-history.yml`（删除）
+  - `scripts/generate_star_history.py`（删除）
+  - `docs/images/star-history-light.svg`（删除）
+  - `docs/images/star-history-dark.svg`（删除）
+  - `README.md`
+  - `README.en.md`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 中英文 README 直接引用 Star History 托管的动态 SVG，并保留明暗主题适配。
+  - 仓库和 Fork 不再包含 Star 图定时任务，不需要 `contents: write` 权限，也不会再产生 `chore: update star history chart` 提交。
+  - Star 趋势展示改为第三方可用性依赖；即使外链暂时不可用，也不会影响领取工作流或修改仓库内容。
+
+### 2026-08-08 修复 checkout 容器等待放大至任务超时
+
+- 现象：
+  - Actions run `31149757724` 在成功打开 Beacon Pines checkout 并多次处理 hCaptcha 后，持续输出 `Primary buttons not found in checkout containers`，最终在 60 分钟 job timeout 时被取消，后续周免未处理。
+- 根因判断：
+  - checkout 等待循环使用手工累加的固定步长统计耗时，但一次容器扫描会按 frame、按钮和 locator timeout 串行放大；日志中标称 1 秒的轮询实际可耗时约 60–90 秒。
+  - `_observe_checkout_outcome()` 在没有发现领取成功、安全检查或 checkout 按钮时仍固定返回 `checkout`，把空白/失效弹窗误判为可继续提交。
+  - 四轮即时结账按状态机循环次数计数，单纯恢复 hCaptcha 的轮次也会消耗一次提交机会；本次实际只提交两次便进入漫长核验。
+- 改动文件：
+  - `app/services/epic_games_service.py`
+  - `tests/test_checkout_state_machine.py`
+  - `tests/test_helper_env_generator.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 容器扫描、checkout ready、购买状态和提交结果观察统一改用 `time.monotonic()` 的真实截止时间；单次扫描共享总预算，不再按 frame 倍增。
+  - 没有发现有效 checkout 容器时返回 `pending`，并以最后一次扫描状态为准；hCaptcha 消失后必须恢复到 `claimed` 或 `checkout` 才视为成功，空白弹窗会进入有界最终核验。
+  - 仅实际点击 `Add to library` / `Place order` 时增加提交计数，安全检查恢复不再吞掉四次提交额度。
+  - 单商品即时 checkout 增加 15 分钟总时间盒，最终核验中的 checkout 恢复每次限制为 2 分钟，避免单个商品占满 60 分钟任务。
+  - 新增容器总预算、pending 判定及安全检查/提交计数回归测试。
+  - env generator 测试改在 pytest 临时目录输出并增加断言，完整测试不再污染仓库的 `docker/` 目录。
