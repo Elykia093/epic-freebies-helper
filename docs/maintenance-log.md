@@ -1229,3 +1229,39 @@
   - 单商品即时 checkout 增加 15 分钟总时间盒，最终核验中的 checkout 恢复每次限制为 2 分钟，避免单个商品占满 60 分钟任务。
   - 新增容器总预算、pending 判定及安全检查/提交计数回归测试。
   - env generator 测试改在 pytest 临时目录输出并增加断言，完整测试不再污染仓库的 `docker/` 目录。
+
+### 2026-08-08 修复可见 Add to library 按钮未被 checkout 扫描命中
+
+- 现象：
+  - Actions run `31257535606` 的失败截图中 checkout 弹窗及 `Add to library` 按钮已经可见，但程序仍连续报告 `Primary buttons not found in checkout containers`，最终核验失败。
+  - 上一轮修复仅通过状态机单元测试，没有使用本地真实账号完成端到端领取验证。
+- 根因判断：
+  - 本地 Camoufox 探针确认真实 purchase frame 中提交按钮的复合选择器、大小写不敏感正则和标题文本定位都返回一个元素，DOM 和选择器本身并未缺失。
+  - 当前 Playwright 1.53 的 `Locator.is_visible(timeout=...)` 会把已声明为忽略的 `timeout` 参数继续传给不接受该参数的 `Frame.is_visible()`，实际抛出 `TypeError`；结账容器扫描的宽泛异常处理吞掉该错误后，将“按钮可见但可见性检查异常”误报成“按钮不存在”。
+  - 早期后备定位同时使用区分大小写的精确文本匹配和全大写常量，无法命中页面实际的 `Add to library` 文本；失败工件又会在任一 frame 读取异常时遗漏整个 frame，掩盖了上述证据。
+- 改动文件：
+  - `app/services/epic_games_service.py`
+  - `tests/test_checkout_state_machine.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 直接把 `webPurchaseContainer` 的 `FrameLocator` 放在扫描首位，再使用 URL 和文本启发式作为回退，避免不必要的 frame handle 转换。
+  - 在读取 frame body 前先扫描可见提交控件，并以大小写不敏感的精确 `Add to library` / `Place order` 正则作为后备入口后向上寻找可点击祖先；移除 Epic 领取路径中传给 `Locator.is_visible()` 的无效 timeout 参数。
+  - 失败工件逐 frame 记录去除查询参数后的 URL、可见操作控件和探测异常；单个 frame 失败不再导致该 frame 从报告中消失。
+  - 本地真实 Camoufox 流程已从持续报告按钮不存在恢复为命中 `ADD TO LIBRARY` 并执行提交；实际领取被账号 24 小时免费游戏限流阻断，未将其误报为领取成功。
+  - 增加 hCaptcha frame 共存、标题大小写文本和 Playwright 无参数可见性调用的回归覆盖。
+
+### 2026-08-08 识别 Epic 账号 24 小时免费游戏领取限流并快速终止
+
+- 现象：
+  - 本地真实 checkout 点击 `Add to library` 后同时出现 hCaptcha 和提示 `Your account is unable to download any more free games ... please wait 24 hours`，程序仍进入挑战求解及重复提交。
+- 根因判断：
+  - 该提示是 Epic 对账号施加的免费游戏领取限流，继续求解 hCaptcha、重试按钮或最终核验都无法完成本次领取。
+  - 现有状态机只有 `claimed`、`security`、`checkout` 和 `pending` 状态，没有账号级不可恢复终止状态，因此把限流场景当作可恢复安全检查。
+- 改动文件：
+  - `app/services/epic_games_service.py`
+  - `tests/test_checkout_state_machine.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 仅在完整匹配“无法继续领取免费游戏”和“等待 24 小时”两段固定文案时判定账号限流，避免普通错误误判。
+  - 在购买状态等待、提交后观察和 hCaptcha 求解前优先检查限流，并通过专用异常穿透 checkout fallback，立即终止本次任务且保留调试截图。
+  - 限流不会被标记为领取成功，也不会继续消耗挑战 API、提交次数或任务总时长。

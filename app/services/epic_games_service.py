@@ -6,6 +6,7 @@
 
 import asyncio
 import json
+import re
 import time
 from contextlib import suppress
 from json import JSONDecodeError
@@ -43,9 +44,30 @@ PURCHASE_IFRAME_SELECTOR = (
     "//iframe[contains(@id, 'webPurchaseContainer') or contains(@src, 'purchase')]"
 )
 CHECKOUT_BUTTON_TEXTS = ("PLACE ORDER", "ADD TO LIBRARY")
+CHECKOUT_BUTTON_PATTERN = re.compile(
+    rf"^(?:{'|'.join(map(re.escape, CHECKOUT_BUTTON_TEXTS))})$", re.IGNORECASE
+)
+CHECKOUT_SUBMIT_SELECTOR = ", ".join(
+    (
+        'button:has-text("Place Order")',
+        'button:has-text("Add to library")',
+        '[role="button"]:has-text("Place Order")',
+        '[role="button"]:has-text("Add to library")',
+        'input[type="submit"][value*="Place Order" i]',
+        'input[type="submit"][value*="Add to library" i]',
+    )
+)
+FREE_GAME_RATE_LIMIT_MARKERS = (
+    "YOUR ACCOUNT IS UNABLE TO DOWNLOAD ANY MORE FREE GAMES",
+    "PLEASE WAIT 24 HOURS BEFORE TRYING TO REDEEM A FREE GAME AGAIN",
+)
 INSTANT_CHECKOUT_TIMEOUT_MS = 15 * 60 * 1000
 RECONCILIATION_CHECKOUT_TIMEOUT_MS = 2 * 60 * 1000
 PurchaseContainer = FrameLocator | Frame | Page
+
+
+class EpicFreeGameRateLimitError(RuntimeError):
+    pass
 
 
 def get_promotions() -> List[PromotionGame]:
@@ -389,7 +411,7 @@ class EpicGames:
     async def _purchase_button_text(page: Page) -> str:
         purchase_btn = page.locator("//button[@data-testid='purchase-cta-button']").first
         with suppress(Exception):
-            if await purchase_btn.is_visible(timeout=500):
+            if await purchase_btn.is_visible():
                 return ((await purchase_btn.text_content()) or "").strip().upper()
         return ""
 
@@ -444,10 +466,31 @@ class EpicGames:
         return urls
 
     @staticmethod
-    async def _is_locator_visible(locator, timeout: int = 300) -> bool:
+    async def _is_locator_visible(locator) -> bool:
         with suppress(Exception):
-            return await locator.first.is_visible(timeout=timeout)
+            return await locator.first.is_visible()
         return False
+
+    @staticmethod
+    async def _is_free_game_rate_limited(page: Page) -> bool:
+        for frame in getattr(page, "frames", []):
+            with suppress(Exception):
+                body_text = await frame.locator("body").inner_text(timeout=500)
+                normalized = " ".join(body_text.upper().split())
+                if all(marker in normalized for marker in FREE_GAME_RATE_LIMIT_MARKERS):
+                    return True
+        return False
+
+    @staticmethod
+    async def _raise_if_free_game_rate_limited(page: Page, url: str) -> None:
+        if not await EpicGames._is_free_game_rate_limited(page):
+            return
+
+        await EpicGames._capture_purchase_debug(page, "free_game_rate_limited", url)
+        raise EpicFreeGameRateLimitError(
+            "Epic blocked additional free-game redemptions for this account; "
+            "wait 24 hours before trying again"
+        )
 
     @staticmethod
     async def _click_visible_continue_button(page: Page) -> bool:
@@ -463,7 +506,7 @@ class EpicGames:
                 count = await locator.count()
                 for index in range(count - 1, -1, -1):
                     button = locator.nth(index)
-                    if not await button.is_visible(timeout=250):
+                    if not await button.is_visible():
                         continue
                     try:
                         await button.click(timeout=2000, force=True)
@@ -681,7 +724,36 @@ class EpicGames:
         await page.screenshot(path=target.joinpath(f"{safe_reason}-{stamp}.png"), full_page=True)
         with suppress(Exception):
             page_text = await page.locator("body").text_content()
-            frame_texts = await EpicGames._frame_texts(page)
+            frame_texts = []
+            for index, frame in enumerate(page.frames):
+                frame_url = (frame.url or "").split("?", 1)[0].split("#", 1)[0]
+                frame_body = ""
+                candidate_summaries = []
+                probe_errors = []
+                try:
+                    frame_body = (await frame.locator("body").inner_text(timeout=1000)) or ""
+                except Exception as err:
+                    probe_errors.append(f"body={type(err).__name__}: {err}")
+                try:
+                    candidates = frame.get_by_text(CHECKOUT_BUTTON_PATTERN)
+                    for candidate_index in range(min(await candidates.count(), 10)):
+                        candidate = candidates.nth(candidate_index)
+                        if await candidate.is_visible():
+                            text = (await candidate.text_content(timeout=300)) or ""
+                            candidate_summaries.append(" ".join(text.split())[:200])
+                except Exception as err:
+                    probe_errors.append(f"actions={type(err).__name__}: {err}")
+                frame_texts.append(
+                    "\n".join(
+                        (
+                            f"FRAME_INDEX: {index}",
+                            f"FRAME_URL: {frame_url}",
+                            f"VISIBLE_ACTIONS: {candidate_summaries}",
+                            f"PROBE_ERRORS: {probe_errors}",
+                            frame_body,
+                        )
+                    )
+                )
             target.joinpath(f"{safe_reason}-{stamp}.txt").write_text(
                 (
                     f"URL: {page.url}\nSOURCE_URL: {url}\n\n"
@@ -719,7 +791,7 @@ class EpicGames:
                     body_text = ""
                     with suppress(Exception):
                         body_text = await page.locator("body").text_content(timeout=2000) or ""
-                    if await EpicGames._is_locator_visible(purchase_btn, timeout=1000) or body_text:
+                    if await EpicGames._is_locator_visible(purchase_btn) or body_text:
                         logger.warning(
                             "Continuing with partially loaded product page - title='{}' url='{}'",
                             title,
@@ -753,7 +825,7 @@ class EpicGames:
         with suppress(Exception):
             iframe_count = await purchase_iframes.count()
             for index in range(iframe_count - 1, -1, -1):
-                if await purchase_iframes.nth(index).is_visible(timeout=300):
+                if await purchase_iframes.nth(index).is_visible():
                     return True
 
         with suppress(Exception):
@@ -947,20 +1019,58 @@ class EpicGames:
 
     @staticmethod
     async def _ordered_checkout_containers(page: Page) -> list[PurchaseContainer]:
+        structural_frames: list[PurchaseContainer] = []
         purchase_frames: list[PurchaseContainer] = []
         fallback_frames: list[PurchaseContainer] = []
+
+        # Resolve Epic's outer purchase iframe before relying on frame enumeration
+        # and URL/text heuristics that can be crowded by hCaptcha frames.
+        with suppress(Exception):
+            purchase_iframes = page.locator(PURCHASE_IFRAME_SELECTOR)
+            for index in range(await purchase_iframes.count() - 1, -1, -1):
+                structural_frames.append(page.frame_locator(PURCHASE_IFRAME_SELECTOR).nth(index))
 
         for frame in reversed(page.frames):
             if frame == page.main_frame:
                 continue
-
             frame_url = (frame.url or "").lower()
             if any(marker in frame_url for marker in ("purchase", "checkout", "payment", "order")):
                 purchase_frames.append(frame)
             else:
                 fallback_frames.append(frame)
 
-        return [*purchase_frames, *fallback_frames, page]
+        return [*structural_frames, *purchase_frames, *fallback_frames, page]
+
+    @staticmethod
+    async def _visible_checkout_submit(container: PurchaseContainer, timeout_ms: int):
+        candidate_groups = []
+        with suppress(Exception):
+            candidate_groups.append(container.locator(CHECKOUT_SUBMIT_SELECTOR))
+        with suppress(Exception):
+            candidate_groups.append(container.get_by_text(CHECKOUT_BUTTON_PATTERN))
+
+        for candidates in candidate_groups:
+            for index in range(min(await candidates.count(), 10)):
+                candidate = candidates.nth(index)
+                if not await candidate.is_visible():
+                    continue
+
+                action = candidate
+                with suppress(Exception):
+                    clickable = candidate.locator(
+                        "xpath=ancestor-or-self::*[self::button or self::input or "
+                        "@role='button' or @tabindex][1]"
+                    )
+                    if await clickable.count() and await clickable.first.is_visible():
+                        action = clickable.first
+
+                text = (
+                    await candidate.text_content(timeout=min(max(timeout_ms, 1), 300))
+                    or await action.get_attribute("value", timeout=min(max(timeout_ms, 1), 300))
+                    or ""
+                )
+                return action, " ".join(text.upper().split()) or "CHECKOUT SUBMIT"
+        return None
 
     @staticmethod
     async def _agree_license(page: Page):
@@ -985,15 +1095,26 @@ class EpicGames:
 
         while time.monotonic() < deadline:
             containers = await EpicGames._ordered_checkout_containers(page)
-            for container in containers:
+            for index, container in enumerate(containers):
                 remaining_ms = int((deadline - time.monotonic()) * 1000)
                 if remaining_ms <= 0:
                     break
 
                 try:
-                    body_text = await container.locator("body").inner_text(
-                        timeout=min(500, remaining_ms)
-                    )
+                    submit = await EpicGames._visible_checkout_submit(container, remaining_ms)
+                    if submit is not None:
+                        checkout_btn, button_text = submit
+                        frame_url = getattr(container, "url", "") or "structural-checkout-frame"
+                        logger.debug(
+                            "✅ Found '{}' button in checkout container url='{}'",
+                            button_text,
+                            frame_url,
+                        )
+                        return container, checkout_btn
+
+                    remaining_containers = max(len(containers) - index, 1)
+                    probe_timeout = min(200, max(1, remaining_ms // remaining_containers))
+                    body_text = await container.locator("body").inner_text(timeout=probe_timeout)
                     frame_url = getattr(container, "url", "") or ""
                     looks_checkout = EpicGames._looks_like_checkout_frame(body_text)
                     url_hint = any(
@@ -1003,26 +1124,13 @@ class EpicGames:
                     if not looks_checkout and not url_hint:
                         continue
 
-                    for button_text in CHECKOUT_BUTTON_TEXTS:
-                        remaining_ms = int((deadline - time.monotonic()) * 1000)
-                        if remaining_ms <= 0:
-                            break
-                        checkout_btn = container.locator("button", has_text=button_text).first
-                        if await checkout_btn.is_visible(timeout=min(500, remaining_ms)):
-                            logger.debug(
-                                "✅ Found '{}' button in checkout container url='{}'",
-                                button_text,
-                                frame_url,
-                            )
-                            return container, checkout_btn
-
                     remaining_ms = int((deadline - time.monotonic()) * 1000)
                     if remaining_ms <= 0:
                         break
                     confirm_btn = container.locator(
                         "//button[contains(@class, 'payment-confirm__btn')]"
                     ).first
-                    if await confirm_btn.is_visible(timeout=min(confirm_timeout, remaining_ms)):
+                    if await confirm_btn.is_visible():
                         logger.debug(
                             "✅ Found payment confirm button in checkout container url='{}'",
                             frame_url,
@@ -1072,7 +1180,7 @@ class EpicGames:
         for index in range(count - 1, -1, -1):
             candidate = overlay.nth(index)
             with suppress(Exception):
-                if not await candidate.is_visible(timeout=200):
+                if not await candidate.is_visible():
                     continue
                 overlay_id = await candidate.get_attribute("id")
                 if overlay_id:
@@ -1131,6 +1239,7 @@ class EpicGames:
         deadline = time.monotonic() + max(timeout_ms, 0) / 1000
 
         while time.monotonic() < deadline:
+            await self._raise_if_free_game_rate_limited(page, url)
             remaining_ms = int((deadline - time.monotonic()) * 1000)
             if remaining_ms <= 0:
                 break
@@ -1183,7 +1292,7 @@ class EpicGames:
 
         for locator in visible_locators:
             with suppress(Exception):
-                if await locator.first.is_visible(timeout=300):
+                if await locator.first.is_visible():
                     return True
 
         if await EpicGames._visible_hcaptcha_frame_urls(page):
@@ -1202,6 +1311,7 @@ class EpicGames:
     async def _resolve_checkout_security_check(
         self, page: Page, agent: AgentV, url: str, max_wait_ms: int = 600000
     ) -> bool:
+        await self._raise_if_free_game_rate_limited(page, url)
         if not await self._is_checkout_security_check_visible(page):
             return True
 
@@ -1212,6 +1322,7 @@ class EpicGames:
 
         while (time.monotonic() - started_at) * 1000 < max_wait_ms:
             attempt += 1
+            await self._raise_if_free_game_rate_limited(page, url)
 
             if await self._is_claimed_state(page, url):
                 logger.success(f"Checkout security check resolved into claimed state - {url=}")
@@ -1535,6 +1646,7 @@ class EpicGames:
                 continue
 
             await self.page.wait_for_timeout(1500)
+            await self._raise_if_free_game_rate_limited(self.page, url)
             if await self._is_checkout_security_check_visible(self.page):
                 logger.debug(f"Place Order {name} click triggered checkout security check. {url=}")
                 return True
@@ -1543,7 +1655,7 @@ class EpicGames:
                 logger.debug(f"Place Order {name} click moved directly into claimed state. {url=}")
                 return True
 
-            if not await self._is_locator_visible(active_btn, timeout=750):
+            if not await self._is_locator_visible(active_btn):
                 logger.debug(f"Place Order button disappeared after {name} click. {url=}")
                 return True
 
@@ -1578,6 +1690,7 @@ class EpicGames:
         checkout_visible = False
 
         while time.monotonic() < deadline:
+            await self._raise_if_free_game_rate_limited(page, url)
             remaining_ms = int((deadline - time.monotonic()) * 1000)
             if remaining_ms <= 0:
                 break
@@ -1760,6 +1873,11 @@ class EpicGames:
                 return False
             return await self._finalize_unconfirmed_checkout(page, promotion)
 
+        except EpicFreeGameRateLimitError:
+            logger.error(
+                "Epic free-game redemption rate limit detected; stopping this run - {}", url
+            )
+            raise
         except Exception as err:
             logger.warning(f"Instant checkout warning: {err}")
             await self._capture_purchase_debug(page, "instant_checkout_warning", url)
@@ -1807,7 +1925,7 @@ class EpicGames:
             # 处理年龄限制弹窗
             try:
                 continue_btn = page.locator("//button//span[text()='Continue']")
-                if await continue_btn.is_visible(timeout=5000):
+                if await continue_btn.is_visible():
                     await continue_btn.click()
             except Exception:
                 pass
@@ -1822,7 +1940,7 @@ class EpicGames:
 
             # 2. 如果没找到主按钮，尝试找“库中”状态
             try:
-                if not await purchase_btn.is_visible(timeout=5000):
+                if not await purchase_btn.is_visible():
                     # 再次检查是否在库中 (有时按钮不叫 purchase-cta，而是简单的 disabled button)
                     all_text = (await page.locator("body").text_content() or "").upper()
                     if any(marker in all_text for marker in owned_markers):

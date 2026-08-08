@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 import services.epic_games_service as epic_games_service
-from services.epic_games_service import EpicGames
+from services.epic_games_service import EpicFreeGameRateLimitError, EpicGames
 
 
 class FakeClock:
@@ -23,8 +23,11 @@ class MissingLocator:
     def first(self):
         return self
 
-    async def is_visible(self, timeout):
+    async def is_visible(self):
         return False
+
+    async def count(self):
+        return 0
 
 
 class SlowBodyLocator:
@@ -60,6 +63,99 @@ class FakePage:
             await self.clock.wait(timeout_ms)
 
 
+class TextBody:
+    def __init__(self, text):
+        self.text = text
+
+    async def inner_text(self, timeout):
+        return self.text
+
+
+class TextFrame:
+    def __init__(self, text):
+        self.text = text
+
+    def locator(self, selector):
+        assert selector == "body"
+        return TextBody(self.text)
+
+
+class VisibleCheckoutButton:
+    async def is_visible(self):
+        return True
+
+    async def text_content(self, timeout):
+        return "Add to library"
+
+    async def get_attribute(self, name, timeout):
+        return None
+
+
+class CheckoutCandidates:
+    def __init__(self, button):
+        self.button = button
+
+    async def count(self):
+        return 1
+
+    def nth(self, index):
+        assert index == 0
+        return self.button
+
+
+class StructuralCheckoutFrame:
+    url = "https://store.epicgames.com/widget"
+
+    def __init__(self, button):
+        self.button = button
+
+    def locator(self, selector, **kwargs):
+        if selector == epic_games_service.CHECKOUT_SUBMIT_SELECTOR:
+            return CheckoutCandidates(self.button)
+        raise AssertionError("visible structural checkout button must be checked before body text")
+
+
+class TextOnlyCheckoutFrame:
+    def __init__(self, button):
+        self.button = button
+
+    def locator(self, selector, **kwargs):
+        assert selector == epic_games_service.CHECKOUT_SUBMIT_SELECTOR
+        return MissingLocator()
+
+    def get_by_text(self, pattern):
+        assert pattern.fullmatch("Add to library")
+        return CheckoutCandidates(self.button)
+
+
+class IframeLocator:
+    def __init__(self, frame):
+        self.frame = frame
+
+    async def count(self):
+        return 1
+
+    def nth(self, index):
+        assert index == 0
+        return self.frame
+
+
+class StructuralCheckoutPage(FakePage):
+    def __init__(self, checkout_frame, fallback_frame):
+        super().__init__()
+        self.main_frame = object()
+        self.frames = [self.main_frame, fallback_frame, checkout_frame]
+        self.checkout_frame = checkout_frame
+
+    def locator(self, selector):
+        assert selector == epic_games_service.PURCHASE_IFRAME_SELECTOR
+        return IframeLocator(self.checkout_frame)
+
+    def frame_locator(self, selector):
+        assert selector == epic_games_service.PURCHASE_IFRAME_SELECTOR
+        return IframeLocator(self.checkout_frame)
+
+
 def test_active_purchase_container_uses_one_total_timeout(monkeypatch):
     clock = FakeClock()
     scans = []
@@ -79,8 +175,74 @@ def test_active_purchase_container_uses_one_total_timeout(monkeypatch):
             )
         )
 
-    assert scans == [500]
+    assert len(scans) >= 3
+    assert sum(scans) <= 500
     assert clock.value == pytest.approx(0.5)
+
+
+def test_active_purchase_container_prioritizes_structural_checkout_frame():
+    button = VisibleCheckoutButton()
+    checkout_frame = StructuralCheckoutFrame(button)
+    page = StructuralCheckoutPage(checkout_frame, SimpleNamespace(url="https://hcaptcha.com/1"))
+
+    container, located_button = asyncio.run(
+        EpicGames._active_purchase_container(
+            page, place_order_timeout=500, confirm_timeout=500, log_missing=False
+        )
+    )
+
+    assert container is checkout_frame
+    assert located_button is button
+
+
+def test_visible_checkout_submit_matches_title_case_text_fallback():
+    button = VisibleCheckoutButton()
+
+    located_button, text = asyncio.run(
+        EpicGames._visible_checkout_submit(TextOnlyCheckoutFrame(button), timeout_ms=500)
+    )
+
+    assert located_button is button
+    assert text == "ADD TO LIBRARY"
+
+
+def test_free_game_rate_limit_requires_complete_epic_message():
+    partial_page = SimpleNamespace(
+        frames=[TextFrame("Your account is unable to download any more free games")]
+    )
+    limited_page = SimpleNamespace(
+        frames=[
+            TextFrame(
+                "Your account is unable to download any more free games at this time, "
+                "please wait 24 hours before trying to redeem a free game again."
+            )
+        ]
+    )
+
+    assert asyncio.run(EpicGames._is_free_game_rate_limited(partial_page)) is False
+    assert asyncio.run(EpicGames._is_free_game_rate_limited(limited_page)) is True
+
+
+def test_rate_limit_error_is_not_swallowed_by_checkout_fallback(monkeypatch):
+    page = FakePage()
+    game = EpicGames(page)
+
+    async def rate_limited(*args, **kwargs):
+        raise EpicFreeGameRateLimitError("wait 24 hours")
+
+    async def unexpected_finalize(*args, **kwargs):
+        pytest.fail("rate limiting must not enter final reconciliation")
+
+    monkeypatch.setattr(epic_games_service, "AgentV", lambda **kwargs: object())
+    monkeypatch.setattr(game, "_wait_for_purchase_state", rate_limited)
+    monkeypatch.setattr(game, "_finalize_unconfirmed_checkout", unexpected_finalize)
+
+    with pytest.raises(EpicFreeGameRateLimitError, match="wait 24 hours"):
+        asyncio.run(
+            game._handle_instant_checkout(
+                page, SimpleNamespace(url="https://example.test/game"), timeout_ms=1000
+            )
+        )
 
 
 def test_observe_checkout_outcome_returns_pending_without_container(monkeypatch):
