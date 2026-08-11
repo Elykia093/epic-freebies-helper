@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 from hcaptcha_challenger.models import (
     ChallengeRouterResult,
@@ -7,11 +8,73 @@ from hcaptcha_challenger.models import (
 )
 
 from extensions.llm_adapter import (
+    _GLMAsyncModels,
     _coerce_payload_for_schema,
     _extract_challenge_type,
     _extract_json_payload,
     _normalize_glm_payload,
 )
+
+
+def _glm_config(schema, *, thinking_config=None):
+    return SimpleNamespace(
+        response_schema=schema,
+        system_instruction=None,
+        temperature=None,
+        thinking_config=thinking_config,
+    )
+
+
+def test_multi_target_instruction_excludes_animal_count_reference_column():
+    client = _GLMAsyncModels(settings=None, storage={})
+    contents = SimpleNamespace(
+        role="user",
+        parts=[SimpleNamespace(inline_data=SimpleNamespace(data=b"image", mime_type="image/png"))],
+    )
+
+    messages = client._build_messages(contents, _glm_config(ImageAreaSelectChallenge))
+
+    assert "right-hand column" in messages[0]["content"]
+    assert "select only matching tiles in the left grid" in messages[0]["content"]
+
+
+def test_glm_45_point_selection_disables_thinking():
+    client = _GLMAsyncModels(settings=None, storage={})
+
+    payload = client._build_payload(
+        model="glm-4.5v",
+        contents=[],
+        config=_glm_config(ImageAreaSelectChallenge, thinking_config=object()),
+        kwargs={},
+    )
+
+    assert payload["thinking"] == {"type": "disabled"}
+
+
+def test_glm_45_drag_selection_keeps_thinking_enabled():
+    client = _GLMAsyncModels(settings=None, storage={})
+
+    payload = client._build_payload(
+        model="glm-4.5v",
+        contents=[],
+        config=_glm_config(ImageDragDropChallenge, thinking_config=object()),
+        kwargs={},
+    )
+
+    assert payload["thinking"] == {"type": "enabled"}
+
+
+def test_glm_46_point_selection_preserves_existing_thinking_behavior():
+    client = _GLMAsyncModels(settings=None, storage={})
+
+    payload = client._build_payload(
+        model="glm-4.6v",
+        contents=[],
+        config=_glm_config(ImageAreaSelectChallenge, thinking_config=object()),
+        kwargs={},
+    )
+
+    assert "thinking" not in payload
 
 
 def test_area_select_box_answer_is_converted_to_click_points():
