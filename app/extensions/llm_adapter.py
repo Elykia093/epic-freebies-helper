@@ -81,8 +81,23 @@ GLM_COMPLEX_DRAG_INSTRUCTION = (
 GLM_MULTI_TARGET_INSTRUCTION = (
     "For multi-target selection challenges, inspect every candidate and return every matching "
     "target, not only the first one. Use the center of each selected object and preserve a "
-    "stable visual reading order."
+    "stable visual reading order. For count-based animal tasks, a right-hand column containing "
+    "example animals and numeric count badges is a non-clickable reference: select only matching "
+    "tiles in the left grid, never the reference animals, badges, header, or margins, and return "
+    "exactly "
+    "the requested count for each example."
 )
+
+
+def _glm_thinking_payload(model: str, config: Any) -> dict[str, str] | None:
+    """Keep GLM point-selection calls within hCaptcha response budgets."""
+    if not model.lower().startswith("glm-4.5"):
+        return None
+    if getattr(config, "thinking_config", None) is None:
+        return None
+    if "points" in _schema_field_names(getattr(config, "response_schema", None)):
+        return {"type": "disabled"}
+    return {"type": "enabled"}
 
 
 def _ensure_list(value: Any) -> list[Any]:
@@ -1116,8 +1131,8 @@ class _GLMAsyncModels:
         if getattr(config, "response_schema", None) is not None:
             payload["response_format"] = {"type": "json_object"}
 
-        if getattr(config, "thinking_config", None) is not None and model.startswith("glm-4.5"):
-            payload["thinking"] = {"type": "enabled"}
+        if thinking_payload := _glm_thinking_payload(model, config):
+            payload["thinking"] = thinking_payload
 
         payload.update({k: v for k, v in kwargs.items() if k not in {"config"}})
         return payload
