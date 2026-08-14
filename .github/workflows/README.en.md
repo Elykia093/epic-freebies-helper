@@ -187,7 +187,13 @@ Example log for a 429 rate-limit case:
 
 ![GLM 429 rate limit log](../../docs/images/faq/glm-429-rate-limit.png)
 
-### 4. Why is the default schedule weekly now?
+### 4. hCaptcha repeatedly logs GLM timeouts or HSW decoding failures
+
+Sync the latest `master` from the upstream repository first. The current version reports a single GLM timeout as `GLM request timed out after ...` and limits network attempts so retries cannot consume the entire challenge budget. It also requests `hsw.js` without compression to avoid `NS_ERROR_INVALID_CONTENT_ENCODING` in Camoufox/Firefox.
+
+These safeguards do not bypass Epic or hCaptcha risk controls. If difficult challenges continue after syncing, verify GLM API stability and consider configuring `BROWSER_PROXY`; GitHub-hosted runners still use shared outbound IPs that may increase challenge difficulty. Do not disable `glm-4.6v` thinking just to reduce latency: replaying this failure sample showed materially worse point-selection accuracy with thinking disabled.
+
+### 5. Why is the default schedule weekly now?
 
 Epic weekly freebies usually refresh on Thursday. For most regular users, running once after the refresh is a better default: it uses fewer GitHub Actions minutes and matches the real claim cycle more closely.
 

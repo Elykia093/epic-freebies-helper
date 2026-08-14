@@ -8,7 +8,7 @@ from typing import AsyncIterator
 from urllib.parse import unquote, urlsplit
 
 from loguru import logger
-from playwright.async_api import BrowserContext, ViewportSize, async_playwright
+from playwright.async_api import BrowserContext, Route, ViewportSize, async_playwright
 from requests import HTTPError, RequestException
 
 from settings import RECORD_DIR, settings
@@ -143,6 +143,17 @@ def _is_camoufox_bootstrap_error(err: Exception) -> bool:
     )
 
 
+async def _install_hsw_identity_route(context: BrowserContext) -> None:
+    async def force_identity_encoding(route: Route) -> None:
+        headers = await route.request.all_headers()
+        headers["accept-encoding"] = "identity"
+        await route.continue_(headers=headers)
+
+    # Camoufox/Firefox can fail while decoding hCaptcha's compressed hsw.js response.
+    # Keep the workaround scoped to that script instead of changing all browser traffic.
+    await context.route("**/hsw.js*", force_identity_encoding)
+
+
 @asynccontextmanager
 async def open_browser_context(headless: bool | str) -> AsyncIterator[BrowserContext]:
     backend = (settings.BROWSER_BACKEND or "auto").strip().lower()
@@ -172,6 +183,7 @@ async def open_browser_context(headless: bool | str) -> AsyncIterator[BrowserCon
                 type(err).__name__,
             )
         else:
+            await _install_hsw_identity_route(browser)
             logger.info(
                 "Browser backend active | backend=camoufox | headless_mode={} | proxy_enabled={}",
                 headless,
@@ -197,6 +209,7 @@ async def open_browser_context(headless: bool | str) -> AsyncIterator[BrowserCon
             browser = await playwright.firefox.launch_persistent_context(
                 **_playwright_launch_options(headless, proxy, display=display)
             )
+            await _install_hsw_identity_route(browser)
             logger.warning(
                 "Browser backend active | backend=playwright-firefox | "
                 "headless_mode={} | proxy_enabled={}",

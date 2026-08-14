@@ -1313,3 +1313,31 @@
   - 多选提示明确将右侧动物/数量栏定义为不可点击参考区，要求只从左侧网格按指定数量返回目标中心点。
   - GLM 4.5 的点选 schema 关闭 thinking；拖拽 schema 保持开启，GLM 4.6 的既有行为不变。
   - 新增提示注入和 thinking-mode 分支回归测试，覆盖点选、拖拽和 GLM 4.6 保持默认行为。
+
+### 2026-08-14 修复 hCaptcha HSW 解码、GLM 超时预算和越界点击
+
+- 现象：
+  - Actions run `31766718025` 在登录 hCaptcha 阶段运行约 25 分钟后失败；同一轮任务中多次出现 GLM 约 50 秒读取超时、`HSW reverse failed` 和挑战执行超时。
+  - Firefox 读取 `/hsw.js` 正文时报 `NS_ERROR_INVALID_CONTENT_ENCODING`，随后 payload/count 为空，确定性求解器无法使用。
+  - 动物计数题真实截图中的参考条在左、可点击网格在右，但旧提示词写成相反方向；模型还返回过超出挑战框下沿的 `y=809` 坐标，旧流程会直接点击。
+- 根因判断：
+  - Camoufox/Firefox 对该次压缩的 HSW 响应解码失败；问题位于浏览器响应正文读取层，不是 HSW 算法本身。
+  - GLM 50 秒客户端时限叠加上游三次网络重试和固定等待，最坏耗时超过 hCaptcha 单轮 120 秒执行时限；日志只打印空的 `ReadTimeout` 文本，难以辨认。
+  - 点选流程缺少挑战框/可点击区域校验，计数题提示又错误依赖固定左右布局，模型的参考条和越界坐标都可能进入鼠标点击。
+- 改动文件：
+  - `app/services/browser_context.py`
+  - `app/extensions/llm_adapter.py`
+  - `app/extensions/hcaptcha_adapter.py`
+  - `tests/test_browser_context.py`
+  - `tests/test_glm_adapter.py`
+  - `tests/test_hcaptcha_adapter.py`
+  - `.github/workflows/README.md`
+  - `.github/workflows/README.en.md`
+  - `docs/hcaptcha-reliability-plan.md`
+  - `.gitignore`
+- 处理结果：
+  - 仅对 `hsw.js` 强制无压缩传输，保留其他请求头和网络行为；真实 Camoufox 探针读取到 HTTP 200、1,220,616 字节正文，且响应不再包含 `content-encoding`。
+  - GLM 超时异常包含时限和异常类型，上游网络尝试从三次限制为两次；保留 GLM 4.6 thinking，因为失败截图重放显示全局关闭会降低坐标准确率。
+  - 计数题提示改为方向无关；通过重复数量徽标识别参考条方向并约束另一侧网格。所有点选答案在缓存和点击前验证挑战边界，计数题额外验证可点击网格，越界答案直接拒绝。
+  - 无效的标量拖拽坐标提前报告为结构错误；新增浏览器请求头、超时信息、重试预算、左右参考条和越界坐标回归覆盖。
+  - 本地定向测试 `35 passed`，完整测试 `60 passed`，Ruff、变更文件 Black 和 `git diff --check` 均通过。

@@ -139,3 +139,5 @@ user_data
 app/volumes
 
 .claude/
+.DS_Store
+.forensics/

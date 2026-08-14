@@ -10,9 +10,11 @@ from extensions.numbered_line_solver import NumberedDragSolution
 from extensions.hcaptcha_adapter import (
     _correct_drag_source_points,
     _decode_entity_contour,
+    _detect_clickable_grid_bounds,
     _detect_task_canvas_origin,
     _is_line_completion_question,
     _match_outline_contours,
+    _point_answer_validation_error,
     _queue_empty_checkcaptcha_response,
     _select_line_gap_markers,
 )
@@ -25,11 +27,68 @@ def _write_challenge_screenshot(path, *, canvas_y: int, canvas_height: int):
     assert cv2.imwrite(str(path), image)
 
 
+def _write_count_challenge(path, *, reference_side: str):
+    image = np.full((470, 500, 3), 245, dtype=np.uint8)
+    image[:108] = (143, 131, 0)
+    image[130:460, 10:490] = (80, 120, 160)
+    badge_x = 65 if reference_side == "left" else 435
+    for badge_y in (165, 275, 385):
+        cv2.ellipse(image, (badge_x, badge_y), (29, 18), 0, 0, 360, (20, 20, 20), -1)
+    assert cv2.imwrite(str(path), image)
+
+
 def test_drag_canvas_origin_supports_multi_shape_layout(tmp_path):
     screenshot = tmp_path / "challenge.png"
     _write_challenge_screenshot(screenshot, canvas_y=130, canvas_height=330)
 
     assert _detect_task_canvas_origin(screenshot) == (10, 130)
+
+
+def test_count_challenge_grid_is_opposite_left_reference_strip(tmp_path):
+    screenshot = tmp_path / "left-reference.png"
+    _write_count_challenge(screenshot, reference_side="left")
+
+    bounds = _detect_clickable_grid_bounds(screenshot)
+
+    assert bounds is not None
+    assert bounds[0] >= 150
+    assert bounds[2] == 489
+
+
+def test_count_challenge_grid_is_opposite_right_reference_strip(tmp_path):
+    screenshot = tmp_path / "right-reference.png"
+    _write_count_challenge(screenshot, reference_side="right")
+
+    bounds = _detect_clickable_grid_bounds(screenshot)
+
+    assert bounds is not None
+    assert bounds[0] == 10
+    assert bounds[2] <= 350
+
+
+def test_point_answer_rejects_challenge_and_grid_overflow():
+    challenge_bbox = {"x": 390, "y": 100, "width": 500, "height": 470}
+    clickable_bounds = (560, 230, 880, 560)
+
+    outside_challenge = _point_answer_validation_error(
+        [SimpleNamespace(x=836, y=809)],
+        challenge_bbox=challenge_bbox,
+        clickable_bounds=clickable_bounds,
+    )
+    reference_strip = _point_answer_validation_error(
+        [SimpleNamespace(x=426, y=300)],
+        challenge_bbox=challenge_bbox,
+        clickable_bounds=clickable_bounds,
+    )
+    valid = _point_answer_validation_error(
+        [SimpleNamespace(x=700, y=400)],
+        challenge_bbox=challenge_bbox,
+        clickable_bounds=clickable_bounds,
+    )
+
+    assert "outside challenge bounds" in outside_challenge
+    assert "outside clickable grid" in reference_strip
+    assert valid is None
 
 
 def test_payload_entity_centers_replace_invalid_model_sources(tmp_path):
@@ -213,3 +272,5 @@ def test_nonempty_checkcaptcha_response_cancels_pending_failure():
         return agent._captcha_response_queue.empty()
 
     assert asyncio.run(scenario()) is True
+    _detect_clickable_grid_bounds,
+    _point_answer_validation_error,

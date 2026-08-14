@@ -179,7 +179,13 @@ GitHub 的共享出口 IP 可能被 Epic 风控。通常换个时间重新执行
 
 ![GLM 429 rate limit log](../../docs/images/faq/glm-429-rate-limit.png)
 
-### 4. 为什么现在默认改成每周一次
+### 4. hCaptcha 日志反复出现 GLM 超时或 HSW 解码失败
+
+先同步主仓库的最新 `master`。当前版本会把 GLM 单次请求超时明确记录为 `GLM request timed out after ...`，并限制单轮网络尝试次数，避免模型重试耗尽整个验证码时限；浏览器也会自动对 `hsw.js` 使用无压缩传输，规避 `NS_ERROR_INVALID_CONTENT_ENCODING`。
+
+这些处理不会绕过 Epic/hCaptcha 的风控。若同步后仍持续收到更难的挑战，优先检查 GLM API 是否稳定，并考虑配置 `BROWSER_PROXY`；GitHub Hosted Runner 的共享出口 IP 仍可能提高挑战难度。不要通过关闭 `glm-4.6v` thinking 来单纯换取速度，本项目的失败样本重放中，这会显著降低点选准确率。
+
+### 5. 为什么现在默认改成每周一次
 
 Epic 周免通常在每周四刷新。对大多数普通用户来说，把默认 schedule 放在周免刷新之后、每周跑一次，更省配额，也更符合实际使用习惯。
 

@@ -2,6 +2,7 @@
 
 > 状态：已复核并实施 P0-P2；P3 待分题型数据
 > 日期：2026-07-26
+> 最近复核：2026-08-14，基于 Actions run `31766718025` 的完整日志和截图工件
 > 基线分支：`protocol-provider-architecture` @ `2fd6326`
 > 上游：`hcaptcha-challenger 0.19.0`（`pyproject.toml` 约束为 `>=0.18.13`）
 
@@ -273,3 +274,23 @@ P0 到 P1-D 建议作为一个批次，它们互相支撑：P0 消除主要故�
 - `docs/provider-protocol-architecture.md:9-16` 仍称 "As of 2026-05-09 ... Do not treat `master` as if it already has a generic multi-protocol provider architecture"，但代码在 `fb7ca19` 已经实现。文档滞后于代码。
 - 按 `CLAUDE.md` 的维护日志规定，上述任一改动落地后都需向 `docs/maintenance-log.md` 追加"现象 / 根因判断 / 改动文件 / 处理结果"四段式条目。
 - 建议把 `pyproject.toml:8` 的 `hcaptcha-challenger>=0.18.13` 收紧上界（如 `>=0.19,<0.20`）。本次事故的根因就是 minor 版本自由漂移，而项目对上游的耦合面（继承 `AgentConfig`、引用 models、monkeypatch `google.genai`）宽到经不起这种漂移。
+
+---
+
+## 九、2026-08-14 失败工件复核与增量修复
+
+Actions run `31766718025` 不是单一的“模型答错”。同一次登录流程中存在三个可以分别验证的问题：
+
+1. GLM 视觉请求在 50 秒客户端时限后进入上游三次重试，单个推理步骤理论上会消耗约 156 秒，超过 hCaptcha 单轮 120 秒执行时限。
+2. Camoufox/Firefox 读取压缩的 `/hsw.js` 时出现 `NS_ERROR_INVALID_CONTENT_ENCODING`，导致 HSW 逆向结果为空，确定性求解器随之降级。
+3. 动物计数题的参考条实际位于左侧、可点击 4×4 网格位于右侧；旧提示词把方向写死为相反布局。另一次模型回答包含 `y=809`，已经超过挑战框下沿，但旧流程仍会直接点击。
+
+本轮采用最小边界修复，而不是关闭 GLM 4.6 的 thinking：本地重放显示关闭 thinking 虽然能把响应时间降到约 7–11 秒，却会返回全部网格或参考条坐标，准确率明显下降。
+
+- 浏览器只对 `**/hsw.js*` 请求设置 `Accept-Encoding: identity`，其他 Epic、hCaptcha 和模型请求头保持不变。
+- GLM 请求超时会包含预算和异常类型；上游 provider 的网络尝试从三次收紧为两次，使 `2 × 50s + 3s` 保持在单轮 120 秒时限内。
+- 动物计数提示改成方向无关描述；只有题目同时包含 animal/count 特征时才检测重复数量徽标，并把另一侧方形区域识别为可点击网格。
+- 点选回答在缓存和点击前必须通过挑战框边界校验；识别出计数网格时还必须通过网格边界校验。越界答案明确拒绝，不再产生无效点击。
+- 拖拽回答中的标量起止值不再透传给 Pydantic，而是作为无效坐标结构提前拒绝。
+
+本地验证结果：完整测试 `60 passed`；真实失败截图识别出的网格为图像坐标 `x=170..490, y=135..455`；Camoufox 打开 hCaptcha 官方演示页后，`hsw.js` 返回 HTTP 200、正文 1,220,616 字节且没有 `content-encoding`，正文读取成功。

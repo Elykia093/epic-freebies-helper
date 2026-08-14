@@ -1,6 +1,9 @@
+import asyncio
 import json
 from types import SimpleNamespace
 
+import httpx
+import pytest
 from hcaptcha_challenger.models import (
     ChallengeRouterResult,
     ImageAreaSelectChallenge,
@@ -12,6 +15,7 @@ from extensions.llm_adapter import (
     _coerce_payload_for_schema,
     _extract_challenge_type,
     _extract_json_payload,
+    _limit_glm_provider_attempts,
     _normalize_glm_payload,
 )
 
@@ -25,7 +29,7 @@ def _glm_config(schema, *, thinking_config=None):
     )
 
 
-def test_multi_target_instruction_excludes_animal_count_reference_column():
+def test_multi_target_instruction_treats_either_reference_side_as_nonclickable():
     client = _GLMAsyncModels(settings=None, storage={})
     contents = SimpleNamespace(
         role="user",
@@ -34,8 +38,8 @@ def test_multi_target_instruction_excludes_animal_count_reference_column():
 
     messages = client._build_messages(contents, _glm_config(ImageAreaSelectChallenge))
 
-    assert "right-hand column" in messages[0]["content"]
-    assert "select only matching tiles in the left grid" in messages[0]["content"]
+    assert "can appear on either side" in messages[0]["content"]
+    assert "Select only matching tiles in the separate grid" in messages[0]["content"]
 
 
 def test_glm_45_point_selection_disables_thinking():
@@ -75,6 +79,46 @@ def test_glm_46_point_selection_preserves_existing_thinking_behavior():
     )
 
     assert "thinking" not in payload
+
+
+def test_glm_provider_retry_budget_is_limited_to_two_attempts():
+    assert _limit_glm_provider_attempts() is True
+
+    from hcaptcha_challenger.tools.internal.providers.gemini import GeminiProvider
+
+    assert GeminiProvider.generate_with_images.retry.stop.max_attempt_number == 2
+
+
+def test_glm_timeout_includes_budget_and_exception_type(monkeypatch):
+    class Secret:
+        @staticmethod
+        def get_secret_value():
+            return "not-a-real-key"
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            raise httpx.ReadTimeout("")
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: Client())
+    client = _GLMAsyncModels(
+        settings=SimpleNamespace(
+            GLM_BASE_URL="https://example.invalid/v4",
+            GLM_API_KEY=Secret(),
+            GLM_REQUEST_TIMEOUT_SECONDS=50,
+        ),
+        storage={},
+    )
+
+    with pytest.raises(TimeoutError, match=r"50 seconds \(ReadTimeout\)"):
+        asyncio.run(
+            client.generate_content("glm-4.6v", [], config=_glm_config(ImageAreaSelectChallenge))
+        )
 
 
 def test_area_select_box_answer_is_converted_to_click_points():
@@ -214,6 +258,13 @@ def test_drag_src_tgt_aliases_are_converted_to_path():
     assert [path.model_dump() for path in challenge.paths] == [
         {"start_point": {"x": 840, "y": 322}, "end_point": {"x": 640, "y": 470}}
     ]
+
+
+def test_drag_scalar_coordinates_are_rejected_before_schema_validation():
+    payload = {"paths": [{"start_point": 842, "end_point": 676}]}
+
+    with pytest.raises(ValueError, match="valid coordinate pairs"):
+        _coerce_payload_for_schema(payload, ImageDragDropChallenge, json.dumps(payload))
 
 
 def test_drag_src_dest_aliases_are_converted_to_path():
