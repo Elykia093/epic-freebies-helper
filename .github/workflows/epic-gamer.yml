@@ -82,7 +82,8 @@ jobs:
           IMAGE_CLASSIFIER_MODEL: ${{ vars.IMAGE_CLASSIFIER_MODEL || secrets.IMAGE_CLASSIFIER_MODEL }}
           SPATIAL_POINT_REASONER_MODEL: ${{ vars.SPATIAL_POINT_REASONER_MODEL || secrets.SPATIAL_POINT_REASONER_MODEL }}
           SPATIAL_PATH_REASONER_MODEL: ${{ vars.SPATIAL_PATH_REASONER_MODEL || secrets.SPATIAL_PATH_REASONER_MODEL }}
-          BROWSER_BACKEND: auto
+          # Use the installed Firefox backend while Camoufox's package/browser versions differ.
+          BROWSER_BACKEND: playwright
           BROWSER_PROXY: ${{ secrets.BROWSER_PROXY }}
           HEADLESS: virtual
           DISABLE_BEZIER_TRAJECTORY: false
