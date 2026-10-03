@@ -146,6 +146,19 @@ Configuration page example:
 
 ![GitHub Actions Secrets example](docs/images/tutorial/step2-actions-secrets.png)
 
+For SiliconFlow vision models, select the `glm` OpenAI-compatible adapter:
+
+| Actions location | Setting | Example value |
+| --- | --- | --- |
+| Variables | `LLM_PROVIDER` | `glm` |
+| Secrets | `GLM_API_KEY` | Your SiliconFlow API key |
+| Secrets | `GLM_BASE_URL` | `https://api.siliconflow.cn/v1` |
+| Variables | `GLM_MODEL` | `zai-org/GLM-4.5V` |
+
+You may also select another vision model currently offered by the platform, such as `Qwen/Qwen3-VL-30B-A3B-Thinking`. These are configuration examples, not guarantees of model availability or captcha accuracy. Check the four model overrides in both Secrets and Variables and remove stale values so they follow `GLM_MODEL`. The workflow reads `GLM_BASE_URL` from Secrets only.
+
+When the endpoint explicitly rejects JSON Mode with HTTP 400 and `code=20024` or `Json mode is not supported`, the adapter removes `response_format` and retries once. JSON instructions, response parsing and validation remain enabled. Subsequent calls to the same model on that client omit JSON Mode without additional configuration. Other 400 errors, including `20015 / messages ... 151652 is not in list`, do not trigger this fallback and are not claimed to be fixed. Permanent request or authentication errors stop the run after browser cleanup, including remaining accounts in a multi-account run. HTTP 408, 429, 5xx and network timeouts retain the existing retry policy.
+
 If you use the `official Gemini API`, use this set:
 
 **If you set `LLM_PROVIDER=gemini`, you must provide `GEMINI_API_KEY`; there is no need to create or fill `GLM_API_KEY`.**
