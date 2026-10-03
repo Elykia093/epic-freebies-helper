@@ -153,6 +153,19 @@ WXPush 与 Telegram 相互独立、可同时启用。受微信模板消息限制
 
 ![GitHub Actions Secrets 配置示例](docs/images/tutorial/step2-actions-secrets.png)
 
+如果你使用硅基流动的视觉模型，仍选择 `glm` 兼容接口分支：
+
+| Actions 配置位置 | 配置名 | 示例值 |
+| --- | --- | --- |
+| Variables | `LLM_PROVIDER` | `glm` |
+| Secrets | `GLM_API_KEY` | 你的硅基流动 API Key |
+| Secrets | `GLM_BASE_URL` | `https://api.siliconflow.cn/v1` |
+| Variables | `GLM_MODEL` | `zai-org/GLM-4.5V` |
+
+也可将模型名设为平台当前提供的其他视觉模型，例如 `Qwen/Qwen3-VL-30B-A3B-Thinking`。这只是接口配置示例，不保证模型可用性或验证码通过率。检查 Secrets 和 Variables 两处的四个模型覆盖项；移除旧值后，它们才会统一跟随 `GLM_MODEL`。当前工作流只从 Secrets 读取 `GLM_BASE_URL`。
+
+接口明确返回 HTTP 400、`code=20024` 或 `Json mode is not supported` 时，适配器自动移除 `response_format`，只补发一次请求；JSON 输出提示、响应解析和校验仍保留。同一客户端随后调用该模型时，不再发送 JSON Mode 参数，无需新增环境变量。其他 400 错误（例如 `20015 / messages ... 151652 is not in list`）不会触发该降级，也不能据此宣称已修复。确定性的请求或鉴权错误会在关闭浏览器后终止本轮任务；多账号运行也会停止后续账号，避免重复请求。408、429、5xx 和网络超时仍走原有重试策略。
+
 如果你使用 `Gemini 官方接口`，请按下面这组填写：
 
 **如果你把 `LLM_PROVIDER` 设为 `gemini`，就必须填写 `GEMINI_API_KEY`；无需新建并填写 `GLM_API_KEY`。**

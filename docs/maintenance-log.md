@@ -1414,3 +1414,26 @@
   - 限流仍先发送包含失败原因的摘要，再返回 `rate_limited` 正常结束；不会把限流记为领取成功，其他领取异常仍保持失败。未改动登录、hCaptcha、浏览器或 checkout 业务逻辑，保留 `master` 的 `70354be` 浏览器修复。
   - 对最新 PR 代码完成静态复审，并核对 WXPush 上游 `/wxsend` 响应协议；Ruff、Black、Python 语法、工作流 YAML 和 `git diff --check` 检查通过。
   - 按仓库规则，本轮未执行测试或真实微信投递。新增文件包含 29 个测试定义，但仍缺少发送异常、双渠道调度及限流返回值的集成回归覆盖；不能将此前浏览器修复的 70 项测试结果视为本 PR 的验证结果。
+
+### 2026-10-03 兼容不支持 JSON Mode 的模型接口并终止不可恢复请求
+
+- 现象：
+  - Actions 第 45 次运行在登录验证码阶段重复 30 次 HTTP 400 / code 20024：`Json mode is not supported for this model.`，最终登录失败。
+- 根因判断：
+  - OpenAI 兼容适配器始终要求 `response_format=json_object`，未处理模型不支持 JSON Mode 的能力差异；错误日志仅识别嵌套错误，遗漏硅基流动顶层 code/message。
+  - 第三方验证码库及业务恢复层均会捕获普通异常；仅限制模型 SDK 重试次数，无法阻止外层继续执行同样的错误请求。
+- 改动文件：
+  - `app/extensions/llm_adapter.py`
+  - `app/extensions/llm_errors.py`
+  - `app/deploy.py`
+  - `app/schedule/collect_epic_games_task.py`
+  - `tests/test_glm_json_compatibility.py`
+  - `tests/test_llm_errors.py`
+  - `README.md`、`README.en.md`、`docs/maintenance-log.md`
+- 处理结果：
+  - 仅在 HTTP 400 明确报告 JSON Mode 不支持时移除该参数并补发一次；按客户端实例和模型记录能力，后续请求避免重复发送已知不支持的参数。其他接口保留原 JSON Mode 行为。
+  - 请求中保留明确的 JSON Schema 输出提示，返回仍走现有 JSON 归一化与 Pydantic 校验；兼容顶层及嵌套错误信息。
+  - 确定性的 400/401/403/404/405/413/415/422 错误通过专用内部终止信号穿过第三方恢复逻辑；在浏览器关闭后转换为普通应用异常，沿用失败通知，并终止多账号后续重复请求。408/429/5xx、超时和取消语义保留。
+  - 中英文 README 增加硅基流动配置位置、覆盖项检查及降级边界，无需新增配置变量。
+  - 新增 HTTP MockTransport 与异步边界回归用例，覆盖降级次数、图像及 schema 保留、缓存隔离、最终答案解析、永久/瞬态错误、资源关闭和取消。
+  - 按 AGENTS.md 禁止执行测试的规定，未运行测试、真实模型请求或 Epic 领取；验证限于 Ruff、Black、Python 3.12 语法检查、差异检查及独立静态审计。该改动不宣称解决此前 code 20015 / 151652 图像消息错误，也不保证验证码通过率。

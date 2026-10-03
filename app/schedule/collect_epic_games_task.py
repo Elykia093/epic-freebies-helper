@@ -5,12 +5,14 @@
 @GitHub  : https://github.com/QIN2DIM
 @Desc    :
 """
+
 import asyncio
 from contextlib import suppress
 from typing import List
 
 from playwright.async_api import Page
 
+from extensions.llm_errors import llm_request_boundary
 from services.epic_authorization_service import EpicAuthorization
 from services.browser_context import open_browser_context, resolve_headless_mode
 from services.epic_games_service import EpicAgent
@@ -70,7 +72,7 @@ async def authorize(page: Page):
 async def collect_epic_games_task():
     headless = resolve_headless_mode()
 
-    async with open_browser_context(headless=headless) as browser:
+    async with llm_request_boundary(), open_browser_context(headless=headless) as browser:
         page = browser.pages[0] if browser.pages else await browser.new_page()
 
         agent = EpicAuthorization(page)
