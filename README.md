@@ -178,6 +178,8 @@ WXPush 与 Telegram 相互独立、可同时启用。受微信模板消息限制
 
 上面的 `Qwen3-VL-32B-Instruct` 示例请保持 `GLM_ENABLE_THINKING`、`GLM_THINKING_BUDGET` 未设置；`GLM_MAX_TOKENS` 可设为 `2048`。推理预算示例仅适用于支持相应控制的模型和接口。
 
+**验证码通过后仍登录失败：** `Challenge success` 只说明验证码服务返回通过，并不代表 Epic 已接受登录。如果 Epic 页面显示 `Incorrect response. Please refresh the page.`，程序会识别这次拒绝并进入现有的有限重试，不再把它当作等待登录结果超时。通过验证码后的短暂残留窗口不会立即触发重复解题，后续确实显示的新题仍会处理。`Epic authentication response` 日志只记录端点类别、HTTP 状态、JSON 类型和经过筛选的错误码，不打印响应正文或带参数 URL。应结合这类日志和失败截图判断原因；单凭该页面提示不能确定是模型、网络环境还是 Epic 端校验问题。
+
 如果你使用 `Gemini 官方接口`，请按下面这组填写：
 
 **如果你把 `LLM_PROVIDER` 设为 `gemini`，就必须填写 `GEMINI_API_KEY`；无需新建并填写 `GLM_API_KEY`。**

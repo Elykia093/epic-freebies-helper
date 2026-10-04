@@ -1479,3 +1479,26 @@
   - 保留并强化页面与任务区域验证：非有限、归一化越界、转换后越界均拒绝，CSS右/下边缘按半开区间处理，无 clamp。精确保序去重仅用于同一响应的点击点；不合并相近点、不改拖拽次数。
   - 截图前后、模型返回后以及每次点击/拖拽前检查矩形，变化时不执行旧答案；保存坐标空间、原图名称与矩形元数据，并保留被拒绝的原始响应供排障。
 - 验证：用户已授权本轮离线测试。几何、真实 SDK 请求契约、假页面点选/拖拽集成和既有 LLM/hCaptcha 回归共 **170 passed in 2.61s**，覆盖单图/双图、映射顺序、去重、缓存隔离、边界变化、CSS边缘及本地拖拽。真实模型识别和领取效果仍待新运行验证，不将离线通过等同于领取成功。
+
+### 2026-10-05 坐标协议真实验证与 Epic 登录拒绝定位
+
+- 运行 #52（37224864730）使用合并提交 `f5626816af7c0ebc6eca7cad85f8c20807f12c88`。10 份原始模型缓存均标记 `Qwen/Qwen3-VL-32B-Instruct`，对应坐标文件均为 `image_1000`；本轮响应未出现输出截断，仍有一份空点答案被正确拒绝。
+- UTC 18:43:07 和 18:47:18 两次获得 hCaptcha `Challenge success`，但对应失败截图均显示 Epic 的 `Incorrect response. Please refresh the page.`，随后认证失败，未进入领取。验证码通过不能作为 Epic 登录成功或游戏入库的证据。
+- 根因判断：登录结果等待只消费特定接口的 JSON 错误码，未识别该页面拒绝；原可见性检查将任意可见 hCaptcha iframe 或页面提示视为可解题状态，和 SDK 要求的可见 `challenge-view` 不一致。成功后的短暂残留因此可能再次进入解题等待。这些证据说明诊断与状态处理缺口，尚不能确定 Epic 拒绝响应的上游原因。
+
+### 2026-10-05 区分登录拒绝与待解题状态，并恢复配对的 Camoufox
+
+- 现象：运行 #52 中验证码通过后仍出现 Epic 页面拒绝，现有等待将其误报为超时；此前 Camoufox 0.4.11 自动配到浏览器 156.0.1-beta.33 后报 `Unknown property navigator.appCodeName in config`，Actions 因此临时固定使用 Playwright Firefox。
+- 根因判断：页面错误识别与实际挑战可见性检查存在上述缺口。浏览器启动问题另有明确的包/浏览器版本漂移原因：[Camoufox 0.5.7](https://pypi.org/project/camoufox/0.5.7/) 新增[固定配对机制](https://github.com/daijro/camoufox/pull/810)，包内指定 [156.0.1-beta.34](https://github.com/daijro/camoufox/releases/tag/v156.0.1-beta.34)；新指纹接口调用 `Screen.as_conditions()`，旧 Browserforge 的 Screen 不实现此接口。
+- 改动文件：`app/services/epic_authorization_service.py`、`app/services/browser_context.py`、`pyproject.toml`、`uv.lock`、`tests/test_login_outcome.py`、`tests/test_browser_context.py`、`.github/workflows/epic-gamer.yml`、中英文 README/工作流指南及本维护日志。
+- 处理结果：
+  - 显式识别 `Incorrect response. Please refresh the page.`，交给原有限重试处理；只对真正可见的挑战视图再次解题。验证码通过后的 3 秒窗口持续观察真实登录结果和明确错误，避免立即重解残留题目；MFA 收尾等待受原总截止时间限制。
+  - 可信 Epic 身份接口仅记录端点标签、状态码、JSON 类型、规范化错误码和认证信号；错误队列也只保存规范化代码，避免后续异常泄漏原始正文。验证码成功不会直接设置登录成功。
+  - 精确锁定 `camoufox[geoip]==0.5.7`，切换到其自身的 Screen 类；Playwright 1.53.0 与 Browserforge 1.2.4 保持不变，新 CLI 依赖要求的 wcwidth 升级随锁文件记录。
+  - Actions 使用 `uv sync --frozen` 和 `uv run --no-sync`，显式安装并记录配对浏览器，默认使用 Camoufox；仓库 Variable `BROWSER_BACKEND=playwright` 可回滚后端并跳过 Camoufox 下载。没有修改用户指定模型与模型请求预算。
+- 验证与审计：
+  - 用户已授权测试。以仅用于初始化配置的 `GEMINI_API_KEY=offline-test-key` 执行登录、浏览器参数、坐标、hCaptcha/LLM、编号线段与 Playwright 定向离线回归，最终 **215 passed in 4.25s**；未用该占位值访问模型。Black、Ruff、差异检查及工作流 YAML/嵌入 Python 语法检查通过。
+  - 独立审计发现 `_login` 外层超时重试仍可能将残留 checkbox 当成新题，已将两处重解条件统一为活动挑战判断，新增回归确认只调用一次 solver 且不会误报登录成功。MFA 收尾越过硬期限的问题也已由回归复现并修正。
+  - Windows 上使用临时会话和本地 HTML 实际启动配对浏览器，50 次 iframe 替换、按钮点击、页面切换、录像和关闭/清理均通过；无目标网站请求。实际浏览器视口为 1920×951、DPR 1；版本断言为 `156.0.1-beta.34`，本地证据留在忽略目录 `.forensics/camoufox-0.5.7-smoke`。
+  - 本地发现 0.5.7 的 `camoufox fetch` CLI 可能在仓库目录查询失败后返回而未安装，`active` 也可能仅打印 not fetched。因此工作流使用官方 `launch_path()` 执行下载与文件检查，再对比 `installed_verstr()` 和包内 pin，不凭 CLI 退出码认定安装成功。
+  - 上述验证不等同于 Linux xvfb 或 Epic 登录/领取通过；这些结果由合并后的真实 Actions 继续验证。

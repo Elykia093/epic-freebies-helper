@@ -171,6 +171,8 @@ The protocol is selected separately from `SPATIAL_POINT_REASONER_MODEL` and `SPA
 
 For the `Qwen3-VL-32B-Instruct` example above, leave `GLM_ENABLE_THINKING` and `GLM_THINKING_BUDGET` unset; `GLM_MAX_TOKENS` may be set to `2048`. The thinking-budget examples apply only to models/endpoints that support those controls.
 
+**Login rejected after a captcha passes:** `Challenge success` confirms the captcha service's result, not Epic authentication. If the Epic page displays `Incorrect response. Please refresh the page.`, the application detects the rejection and uses its existing bounded retry flow instead of waiting for a login timeout. A briefly remaining challenge after success does not immediately trigger another solve; a subsequent visible challenge can still be handled. `Epic authentication response` logs contain only the endpoint category, HTTP status, JSON type and a filtered error code, without response bodies or URLs containing query parameters. Use these logs together with failure screenshots; that page message alone cannot establish whether the cause is the model, network environment or Epic's validation.
+
 If you use the `official Gemini API`, use this set:
 
 **If you set `LLM_PROVIDER=gemini`, you must provide `GEMINI_API_KEY`; there is no need to create or fill `GLM_API_KEY`.**
