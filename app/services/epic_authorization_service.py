@@ -790,6 +790,7 @@ class EpicAuthorization:
         deadline = time.monotonic() + timeout_seconds
         account_probe_at = time.monotonic() + 8
         account_probe_attempted = False
+        saw_signed_out_marker = False
 
         while time.monotonic() < deadline:
             if self._needs_privacy_policy_correction():
@@ -807,14 +808,22 @@ class EpicAuthorization:
 
             status = await self._get_login_status(timeout_ms=1500)
             if status == "true":
+                if saw_signed_out_marker:
+                    logger.info("Epic store login marker changed to isloggedin=true")
                 return
             if status == "false":
-                raise RuntimeError(
-                    "Epic store still reports isloggedin=false after authentication. "
-                    f"current_url={self.page.url}"
-                )
+                if not saw_signed_out_marker:
+                    logger.info(
+                        "Epic store initially reports isloggedin=false; waiting for "
+                        "the authenticated store state within the existing timeout"
+                    )
+                saw_signed_out_marker = True
 
-            if not account_probe_attempted and time.monotonic() >= account_probe_at:
+            if (
+                not saw_signed_out_marker
+                and not account_probe_attempted
+                and time.monotonic() >= account_probe_at
+            ):
                 account_probe_attempted = True
                 logger.warning(
                     "Epic navigation login marker did not appear after authentication; "
@@ -828,6 +837,11 @@ class EpicAuthorization:
 
         if self._needs_mfa_setup_prompt():
             raise EpicManualActionRequiredError(self._mfa_setup_prompt_message(self.page.url))
+
+        if saw_signed_out_marker:
+            raise RuntimeError(
+                "Epic store did not confirm isloggedin=true within the authentication wait."
+            )
 
         if await self._has_account_session():
             return
