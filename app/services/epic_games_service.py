@@ -187,6 +187,7 @@ class EpicAgent:
         deadline = time.monotonic() + timeout_seconds
         account_probe_at = time.monotonic() + 8
         account_probe_attempted = False
+        saw_signed_out_marker = False
 
         while time.monotonic() < deadline:
             if self._needs_privacy_policy_correction():
@@ -198,10 +199,23 @@ class EpicAgent:
                 raise EpicManualActionRequiredError(self._mfa_setup_prompt_message(self.page.url))
 
             status = await self._get_login_status(timeout_ms=1500)
-            if status in {"true", "false"}:
-                return status
+            if status == "true":
+                if saw_signed_out_marker:
+                    logger.info("Claim page login marker changed to isloggedin=true")
+                return "true"
+            if status == "false":
+                if not saw_signed_out_marker:
+                    logger.info(
+                        "Claim page initially reports isloggedin=false; waiting for "
+                        "the authenticated store state within the existing timeout"
+                    )
+                saw_signed_out_marker = True
 
-            if not account_probe_attempted and time.monotonic() >= account_probe_at:
+            if (
+                not saw_signed_out_marker
+                and not account_probe_attempted
+                and time.monotonic() >= account_probe_at
+            ):
                 account_probe_attempted = True
                 logger.warning(
                     "Epic navigation login marker did not appear; probing account session via order history."
@@ -214,6 +228,9 @@ class EpicAgent:
 
         if self._needs_mfa_setup_prompt():
             raise EpicManualActionRequiredError(self._mfa_setup_prompt_message(self.page.url))
+
+        if saw_signed_out_marker:
+            return "false"
 
         if await self._has_account_session():
             return "true"

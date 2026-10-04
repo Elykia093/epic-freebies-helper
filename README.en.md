@@ -177,6 +177,8 @@ Each password login attempt permits at most **3 captcha solver calls**, shared b
 
 Qwen3-VL requests also include the question text from the challenge payload, so a missing built-in skill does not leave only a `JobType` label. Drag requests include a reliably extracted source candidate count and instructions to plan each required move separately. Candidate count is not a required move count: no paths are invented, and page coordinates are not mixed into the normalized image protocol.
 
+After login and on a newly opened claim page, the existing 45-second window waits for the store's `isloggedin=true` instead of immediately discarding the session on an initial `false` during loading. Once `false` has been observed, only a subsequent store marker of `true` can confirm success; an account order-history probe cannot override it. The attempt still fails if the wait expires. Pages where the store marker never appears retain the existing account-session fallback.
+
 If you use the `official Gemini API`, use this set:
 
 **If you set `LLM_PROVIDER=gemini`, you must provide `GEMINI_API_KEY`; there is no need to create or fill `GLM_API_KEY`.**

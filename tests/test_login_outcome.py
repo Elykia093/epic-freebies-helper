@@ -624,3 +624,74 @@ def test_only_existing_authenticated_api_signal_counts_as_login_success(
     )
 
     assert (not auth._is_login_success_signal.empty()) is expected_success
+
+
+def test_store_session_waits_for_false_to_become_true_without_account_probe(
+    login_state, monkeypatch
+):
+    auth, _page, clock = login_state(url="https://store.epicgames.com/en-US/free-games")
+    auth._get_login_status.side_effect = lambda **_kwargs: "true" if clock.now >= 109 else "false"
+    probe = AsyncMock(return_value=True)
+    monkeypatch.setattr(auth, "_has_account_session", probe)
+
+    asyncio.run(auth._ensure_store_session_ready())
+
+    assert clock.now == 109
+    probe.assert_not_awaited()
+
+
+def test_store_signed_out_marker_expires_even_with_a_positive_account_session(
+    login_state, monkeypatch
+):
+    auth, _page, clock = login_state(url="https://store.epicgames.com/en-US/free-games")
+    auth._get_login_status.return_value = "false"
+    probe = AsyncMock(return_value=True)
+    monkeypatch.setattr(auth, "_has_account_session", probe)
+
+    with pytest.raises(RuntimeError, match="did not confirm isloggedin=true"):
+        asyncio.run(auth._ensure_store_session_ready())
+
+    assert clock.now == 145
+    probe.assert_not_awaited()
+
+
+def test_store_marker_disappearing_after_false_cannot_enable_account_fallback(
+    login_state, monkeypatch
+):
+    auth, _page, clock = login_state(url="https://store.epicgames.com/en-US/free-games")
+    auth._get_login_status.side_effect = lambda **_kwargs: "false" if clock.now == 100 else None
+    probe = AsyncMock(return_value=True)
+    monkeypatch.setattr(auth, "_has_account_session", probe)
+
+    with pytest.raises(RuntimeError, match="did not confirm isloggedin=true"):
+        asyncio.run(auth._ensure_store_session_ready())
+
+    assert clock.now == 145
+    probe.assert_not_awaited()
+
+
+def test_store_without_any_marker_preserves_positive_order_history_fallback(
+    login_state, monkeypatch
+):
+    auth, _page, clock = login_state(url="https://store.epicgames.com/en-US/free-games")
+    auth._get_login_status.return_value = None
+    probe = AsyncMock(return_value=True)
+    monkeypatch.setattr(auth, "_has_account_session", probe)
+
+    asyncio.run(auth._ensure_store_session_ready())
+
+    assert clock.now == 108
+    probe.assert_awaited_once()
+
+
+def test_store_authenticated_marker_succeeds_immediately(login_state, monkeypatch):
+    auth, _page, clock = login_state(url="https://store.epicgames.com/en-US/free-games")
+    auth._get_login_status.return_value = "true"
+    probe = AsyncMock(return_value=True)
+    monkeypatch.setattr(auth, "_has_account_session", probe)
+
+    asyncio.run(auth._ensure_store_session_ready())
+
+    assert clock.now == 100
+    auth._get_login_status.assert_awaited_once()
+    probe.assert_not_awaited()

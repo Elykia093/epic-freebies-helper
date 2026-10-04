@@ -1,10 +1,11 @@
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 import services.epic_games_service as epic_games_service
-from services.epic_games_service import EpicFreeGameRateLimitError, EpicGames
+from services.epic_games_service import EpicAgent, EpicFreeGameRateLimitError, EpicGames
 
 
 class FakeClock:
@@ -521,3 +522,68 @@ def test_initial_security_state_refreshes_checkout_before_submission(monkeypatch
 
     assert claimed is True
     assert submissions == 1
+
+
+@pytest.mark.parametrize(
+    "scenario,expected_status,expected_elapsed,expected_account_probes",
+    [
+        ("false_then_true", "true", 9, 0),
+        ("always_false", "false", 45, 0),
+        ("false_then_missing", "false", 45, 0),
+        ("always_missing", "true", 8, 1),
+        ("already_true", "true", 0, 0),
+    ],
+)
+def test_claim_page_login_wait_only_allows_verified_sessions_to_check_orders(
+    monkeypatch, scenario, expected_status, expected_elapsed, expected_account_probes
+):
+    clock = FakeClock()
+    page = FakePage(clock)
+    page.url = "https://store.epicgames.com/en-US/free-games"
+    agent = EpicAgent(page)
+    monkeypatch.setattr(epic_games_service, "time", SimpleNamespace(monotonic=clock.monotonic))
+
+    async def marker(**_kwargs):
+        if scenario == "false_then_true":
+            return "true" if clock.value >= 9 else "false"
+        if scenario == "always_false":
+            return "false"
+        if scenario == "false_then_missing":
+            return "false" if clock.value == 0 else None
+        if scenario == "already_true":
+            return "true"
+        return None
+
+    account_probe = AsyncMock(return_value=True)
+    monkeypatch.setattr(agent, "_get_login_status", marker)
+    monkeypatch.setattr(agent, "_has_account_session", account_probe)
+    monkeypatch.setattr(agent, "_goto_claim_page", AsyncMock())
+    order_checks = []
+
+    async def check_orders():
+        order_checks.append(clock.value)
+
+    monkeypatch.setattr(agent, "_check_orders", check_orders)
+    real_wait = agent._wait_for_claim_page_login_state
+    returned_states = []
+
+    async def observe_wait():
+        status = await real_wait()
+        returned_states.append(status)
+        return status
+
+    monkeypatch.setattr(agent, "_wait_for_claim_page_login_state", observe_wait)
+
+    ignored = asyncio.run(agent._should_ignore_task())
+
+    assert returned_states == [expected_status]
+    assert clock.value == expected_elapsed
+    assert account_probe.await_count == expected_account_probes
+    if expected_status == "true":
+        assert agent._ctx_cookies_is_available is True
+        assert order_checks == [expected_elapsed]
+        assert ignored is True  # A verified empty promotion list can be skipped safely.
+    else:
+        assert agent._ctx_cookies_is_available is False
+        assert order_checks == []
+        assert ignored is False

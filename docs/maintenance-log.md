@@ -1524,3 +1524,11 @@
 - 改动文件：`app/extensions/hcaptcha_adapter.py`、`tests/test_spatial_request_contract.py`、中英文 README 及本维护日志。
 - 处理结果：仅对 Qwen3-VL 归一化请求附上可读取的题干；拖拽额外提供安全提取的源候选数量，并要求逐个判断必要移动。题干读取失败、为空或不是字符串时保留原提示；源点不可用时不声明零候选。单图、0..1000 坐标、匹配/路径验证及其他模型的原协议保持，不强制答案长度、不制造额外路径。该改动恢复请求信息，不代表模型识别或真实领取必然通过。
 - 验证：新增请求契约和边界场景确认 JobType-only 分支恢复题干、点选不混入拖拽规划、两候选一条合法模型路径仍只执行一条、空/坏数据安全省略、不重引页面坐标。授权执行的整合回归共 **262 passed in 4.77s**；Black、Ruff、差异检查通过，独立只读审计无阻断项。真实效果仍由新运行验收。
+
+### 2026-10-05 等待登录后及新领取页的商店会话状态
+
+- 现象：运行 #55（37235513195，提交 `e8c5a254919f761329317f3fde9c3573189d312a`）第二次认证的邮箱和密码验证码均通过，`/email` 返回 204、`/login` 返回 200，随后 analytics 出现真实认证信号，并记录 `Login success` 和 `Right account validation success`。UTC 21:21:25.899 完成账号验证，21:21:27.751 因商店首次 `isloggedin=false` 立即失败；截图中的商品仍是加载占位框，随后程序清理了该会话并重新登录。
+- 根因判断：认证后的 `_ensure_store_session_ready` 虽有 45 秒等待窗口，却对第一次 `false` 立即抛错；领取入口另外新开页面，其 `_wait_for_claim_page_login_state` 也立即返回 `false`，同样可能在页面状态初始化期间宣告 cookie 不可用。单次截图不能证明状态一定会自行同步，因此修复必须等待实际正向信号，而不是忽略 `false`。
+- 改动文件：`app/services/epic_authorization_service.py`、`app/services/epic_games_service.py`、`tests/test_login_outcome.py`、`tests/test_checkout_state_machine.py`、中英文 README 及本维护日志。
+- 处理结果：两条路径都在原有窗口内等待真实 `true`，不增加默认超时或轮询间隔。见过 `false` 后禁止订单探测兜底，包括随后变成无标记的情况；认证检查到期抛错，领取页检查到期返回原契约的 `"false"`，消费者仍明确失败。完全没有 `false` 的缺失标记场景保留原有正向账号会话验证，MFA/隐私确认和订单逻辑不变。
+- 验证：两条实际 helper 及领取消费者分别覆盖 false→true、持续 false、false→None、缺标记正向兜底和立即 true；持续 false 即使账号探测可成功也不能进入订单流程。授权执行的整合回归共 **285 passed in 4.87s**，Black、Ruff、差异检查通过，独立审计覆盖 deploy/Celery 新页面调用链，无阻断项。真实商店状态是否完成同步及入库结果仍由下一次运行确认。
