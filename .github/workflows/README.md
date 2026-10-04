@@ -16,10 +16,12 @@
 1. 检出仓库代码。
 2. 安装 `uv` 和 Python 3.12。
 3. 安装系统依赖。
-4. 执行 `uv sync` 安装 Python 依赖。
-5. 尝试下载 Camoufox 浏览器资源，该步骤允许失败。
-6. 安装 Playwright Firefox，作为 Actions 显式选择的浏览器后端。
-7. 在 `xvfb` 环境中，以 `BROWSER_BACKEND=playwright`、`HEADLESS=virtual` 运行 `uv run app/deploy.py`。
+4. 执行 `uv sync --frozen` 安装锁定的 Python 依赖。
+5. 用 `camoufox set --release` 选择包内配对版本，再通过官方 `launch_path()` 下载并检查可执行文件，核对 `installed_verstr()` 与包内版本一致；`camoufox active` 记录最终选择。安装失败或版本不符会停止任务。显式选择 `playwright` 时跳过此步。
+6. 安装 Playwright Firefox，供显式选择该后端时使用。
+7. 在 `xvfb` 环境中，以默认 `BROWSER_BACKEND=camoufox`、`HEADLESS=virtual` 运行 `uv run --no-sync app/deploy.py`。需要回滚后端时，将仓库 Variable `BROWSER_BACKEND` 设为 `playwright`。
+
+当前精确锁定 Camoufox 0.5.7，使用包内指定的浏览器 `156.0.1-beta.34`，避免旧 Python 包配上自动下载的不同版本。启动成功不代表 Epic 一定接受登录，仍需核对认证与入库日志。
 
 它默认由 GitHub 的 `schedule` 和 `workflow_dispatch` 触发，仓库内的 APScheduler 会被关闭，避免重复调度。
 

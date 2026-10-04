@@ -8,8 +8,10 @@
 import asyncio
 import json
 import os
+import re
 import time
 from contextlib import suppress
+from urllib.parse import parse_qs, urlsplit
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 
@@ -48,23 +50,80 @@ class EpicAuthorization:
         self._invalid_totp_rejections = 0
         self._last_captcha_totp_refresh_at = 0.0
 
+    @staticmethod
+    def _id_api_endpoint(url: str) -> str | None:
+        """Return a bounded endpoint label only for trusted Epic identity API URLs."""
+        try:
+            parts = urlsplit(url)
+            host = parts.hostname or ""
+            if (
+                parts.scheme != "https"
+                or not (host == "epicgames.com" or host.endswith(".epicgames.com"))
+                or parts.username is not None
+                or not parts.path.startswith("/id/api/")
+            ):
+                return None
+            endpoint = parts.path[len("/id/api/") :].split("/", 1)[0]
+        except (TypeError, ValueError):
+            return None
+        return endpoint if re.fullmatch(r"[A-Za-z_-]{1,64}", endpoint) else "other"
+
+    @staticmethod
+    def _safe_login_error_code(value: object) -> str:
+        """Keep only bounded Epic error identifiers, never arbitrary response values."""
+        if (
+            isinstance(value, str)
+            and len(value) <= 160
+            and re.fullmatch(r"errors\.com\.[A-Za-z0-9_]+(?:[.-][A-Za-z0-9_]+)*", value)
+        ):
+            return value
+        return "unknown"
+
     async def _on_response_anything(self, r: Response):
-        if r.request.method != "POST" or "talon" in r.url:
+        if r.request.method != "POST":
+            return
+        endpoint = self._id_api_endpoint(r.url)
+        try:
+            parts = urlsplit(r.url)
+            host = parts.hostname or ""
+            refresh_csrf = (
+                parts.scheme == "https"
+                and (host == "epicgames.com" or host.endswith(".epicgames.com"))
+                and parts.username is None
+                and parts.path == "/account/v2/refresh-csrf"
+            )
+        except (TypeError, ValueError):
+            refresh_csrf = False
+        if endpoint is None and not refresh_csrf:
             return
 
-        with suppress(Exception):
+        try:
             result = await r.json()
-            result_json = json.dumps(result, indent=2, ensure_ascii=False)
-
-            if "/id/api/login" in r.url and result.get("errorCode"):
-                self._login_error_signal.put_nowait(result)
-                logger.error(f"{r.request.method} {r.url} - {result_json}")
-            elif "/id/api/analytics" in r.url and result.get("accountId"):
-                self._is_login_success_signal.put_nowait(result)
-            elif "/account/v2/refresh-csrf" in r.url and result.get("success", False) is True:
-                self._is_refresh_csrf_signal.put_nowait(result)
-            # else:
-            #     logger.debug(f"{r.request.method} {r.url} - {result_json}")
+            json_type = type(result).__name__
+        except Exception:
+            result = None
+            json_type = "invalid"
+        payload = result if isinstance(result, dict) else {}
+        error_code = self._safe_login_error_code(payload.get("errorCode"))
+        auth_success = endpoint == "analytics" and bool(payload.get("accountId"))
+        if endpoint is not None:
+            logger.info(
+                "Epic authentication response | endpoint={} | http_status={} | json_type={} "
+                "| error_code={} | auth_success={}",
+                endpoint,
+                r.status,
+                json_type,
+                error_code,
+                auth_success,
+            )
+            if endpoint == "login" and payload.get("errorCode"):
+                self._login_error_signal.put_nowait(
+                    {"errorCode": error_code if error_code != "unknown" else "unknown_error"}
+                )
+            elif auth_success:
+                self._is_login_success_signal.put_nowait({"authenticated": True})
+        elif refresh_csrf and payload.get("success") is True:
+            self._is_refresh_csrf_signal.put_nowait({"success": True})
 
     @staticmethod
     def _drain_queue(queue: asyncio.Queue):
@@ -300,6 +359,40 @@ class EpicAuthorization:
             )
         )
 
+    async def _has_active_hcaptcha_challenge(self) -> bool:
+        """Require a visible challenge view, not a checkbox or a lingering iframe."""
+        for frame in self.page.frames:
+            with suppress(Exception):
+                parts = urlsplit(frame.url or "")
+                host = parts.hostname or ""
+                frame_types = parse_qs(parts.query).get("frame", []) + parse_qs(parts.fragment).get(
+                    "frame", []
+                )
+                if (
+                    parts.scheme == "https"
+                    and (host == "hcaptcha.com" or host.endswith(".hcaptcha.com"))
+                    and parts.username is None
+                    and "challenge" in frame_types
+                    and await (await frame.frame_element()).is_visible()
+                    and await frame.locator(".challenge-view").is_visible()
+                ):
+                    return True
+        return False
+
+    async def _raise_visible_login_rejection(self) -> None:
+        """Surface Epic's explicit verification rejection without logging page content."""
+        try:
+            path = urlsplit(self.page.url).path
+        except (TypeError, ValueError):
+            return
+        if path != "/id/login" and not path.startswith("/id/login/"):
+            return
+        body = " ".join((await self._page_body_text()).split())
+        if "Incorrect response. Please refresh the page." in body:
+            raise RuntimeError(
+                "Epic rejected the login verification response; refresh the login page before retrying."
+            )
+
     async def _wait_for_login_form(self, point_url: str) -> None:
         deadline = time.monotonic() + 45
         recovery_attempts = 0
@@ -362,10 +455,16 @@ class EpicAuthorization:
         raise PlaywrightTimeoutError("Timed out navigating to Epic claim page")
 
     async def _await_login_outcome(
-        self, point_url: str, agent: AgentV, timeout_seconds: int = 300
+        self,
+        point_url: str,
+        agent: AgentV,
+        timeout_seconds: int = 300,
+        *,
+        challenge_succeeded: bool = False,
     ) -> None:
         started_at = time.monotonic()
         deadline = started_at + timeout_seconds
+        captcha_observe_until = started_at + 3.0 if challenge_succeeded else 0.0
         hard_timeout_seconds = max(timeout_seconds, 180)
         max_deadline = started_at + hard_timeout_seconds
         max_totp_attempts = 6
@@ -428,8 +527,9 @@ class EpicAuthorization:
             extend_deadline("totp-submit", 120)
 
         async def wait_for_mfa_captcha_settle(seconds: int = 8) -> bool:
-            settle_deadline = time.monotonic() + seconds
+            settle_deadline = min(time.monotonic() + seconds, deadline)
             while time.monotonic() < settle_deadline:
+                await self._raise_visible_login_rejection()
                 if (
                     not self._is_login_success_signal.empty()
                     or not self._login_error_signal.empty()
@@ -444,7 +544,10 @@ class EpicAuthorization:
                     extend_deadline("mfa-page-disappeared", 60)
                     return True
 
-                if await self._has_visible_hcaptcha():
+                if (
+                    time.monotonic() >= captcha_observe_until
+                    and await self._has_active_hcaptcha_challenge()
+                ):
                     logger.debug(
                         "Another login captcha is visible after MFA captcha; continuing captcha handling"
                     )
@@ -489,6 +592,8 @@ class EpicAuthorization:
                 await self._is_login_success_signal.get()
                 return
 
+            await self._raise_visible_login_rejection()
+
             if self._needs_privacy_policy_correction():
                 raise RuntimeError("privacy_policy_confirmation_required")
 
@@ -499,7 +604,16 @@ class EpicAuthorization:
                     )
                 continue
 
-            if await self._has_visible_hcaptcha():
+            if time.monotonic() < captcha_observe_until:
+                if not self._is_mfa_page() and "/id/login" not in self.page.url:
+                    if "true" == await self._get_login_status(timeout_ms=500, warn_timeout=False):
+                        return
+                await self.page.wait_for_timeout(
+                    min(500.0, max(0.0, captcha_observe_until - time.monotonic()) * 1000)
+                )
+                continue
+
+            if await self._has_active_hcaptcha_challenge():
                 logger.warning(
                     "Login captcha is visible during authentication outcome; solving before "
                     "continuing | current_url='{}'",
@@ -518,6 +632,7 @@ class EpicAuthorization:
                     )
                     challenge_solved = challenge_signal is ChallengeSignal.SUCCESS
                     if challenge_solved:
+                        captcha_observe_until = time.monotonic() + 3.0
                         extend_deadline("captcha-solved", 120)
                     else:
                         logger.warning(
@@ -537,6 +652,8 @@ class EpicAuthorization:
                     if await wait_for_mfa_captcha_settle():
                         await self.page.wait_for_timeout(500)
                         continue
+                    if time.monotonic() >= deadline:
+                        break
 
                     now = time.monotonic()
                     if now - self._last_captcha_totp_refresh_at >= captcha_totp_refresh_cooldown:
@@ -746,11 +863,16 @@ class EpicAuthorization:
                     pass
 
                 try:
-                    await self._await_login_outcome(point_url, agent, timeout_seconds=25)
+                    await self._await_login_outcome(
+                        point_url,
+                        agent,
+                        timeout_seconds=25,
+                        challenge_succeeded=challenge_signal is ChallengeSignal.SUCCESS,
+                    )
                     login_confirmed = True
                     break
                 except PlaywrightTimeoutError:
-                    if await self._has_visible_hcaptcha():
+                    if await self._has_active_hcaptcha_challenge():
                         logger.warning(
                             "Login outcome timed out while captcha is still visible; "
                             "retrying solve attempt {}/3 | signal={}",
@@ -770,7 +892,7 @@ class EpicAuthorization:
                             login_confirmed = True
                             break
                         except PlaywrightTimeoutError:
-                            if not await self._has_visible_hcaptcha():
+                            if not await self._has_active_hcaptcha_challenge():
                                 raise
                         continue
 

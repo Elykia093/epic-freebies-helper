@@ -40,23 +40,35 @@ jobs:
           sudo apt-get install -y xvfb libxml2-dev libxslt-dev
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --frozen
 
       - name: Validate hCaptcha protocol contract
         env:
           PYTHONPATH: app
-        run: uv run python scripts/check_hcaptcha_contract.py
+        run: uv run --no-sync python scripts/check_hcaptcha_contract.py
 
-      # 增加 GITHUB_TOKEN 以降低 Camoufox 下载时的 403 频率限制。
-      # 即使这里失败，运行时也可以回退到 Playwright Firefox。
-      - name: Install Camoufox
-        continue-on-error: true
+      # Use the browser release paired with the locked Camoufox Python package.
+      - name: Install paired Camoufox
+        if: vars.BROWSER_BACKEND != 'playwright'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: uv run camoufox fetch
+        run: |
+          uv run --no-sync camoufox set --release
+          uv run --no-sync python - <<'PY'
+          from camoufox.browser_pin import load_pin
+          from camoufox.pkgman import installed_verstr, launch_path
+
+          executable = launch_path()
+          pin = load_pin()
+          installed = installed_verstr()
+          if pin is None or installed != pin.spec:
+              raise RuntimeError(f"Camoufox package/browser mismatch: {installed}")
+          print(f"Camoufox paired browser verified: {installed} ({executable})")
+          PY
+          uv run --no-sync camoufox active
 
       - name: Install Playwright Firefox fallback
-        run: uv run playwright install firefox
+        run: uv run --no-sync playwright install firefox
 
       - name: Run Epic Awesome Gamer
         env:
@@ -86,8 +98,8 @@ jobs:
           IMAGE_CLASSIFIER_MODEL: ${{ vars.IMAGE_CLASSIFIER_MODEL || secrets.IMAGE_CLASSIFIER_MODEL }}
           SPATIAL_POINT_REASONER_MODEL: ${{ vars.SPATIAL_POINT_REASONER_MODEL || secrets.SPATIAL_POINT_REASONER_MODEL }}
           SPATIAL_PATH_REASONER_MODEL: ${{ vars.SPATIAL_PATH_REASONER_MODEL || secrets.SPATIAL_PATH_REASONER_MODEL }}
-          # Use the installed Firefox backend while Camoufox's package/browser versions differ.
-          BROWSER_BACKEND: playwright
+          # Set the repository variable to playwright for an explicit rollback.
+          BROWSER_BACKEND: ${{ vars.BROWSER_BACKEND || 'camoufox' }}
           BROWSER_PROXY: ${{ secrets.BROWSER_PROXY }}
           HEADLESS: virtual
           DISABLE_BEZIER_TRAJECTORY: false
@@ -100,7 +112,7 @@ jobs:
           PYTHONPATH: app
         run: |
           echo "🚀 启动定时领取任务（支持 Gemini/AiHubMix/GLM）..."
-          xvfb-run --auto-servernum --server-num=1 --server-args='-screen 0, 1920x1080x24' uv run app/deploy.py
+          xvfb-run --auto-servernum --server-num=1 --server-args='-screen 0, 1920x1080x24' uv run --no-sync app/deploy.py
 
       - name: Write success summary
         if: success()
