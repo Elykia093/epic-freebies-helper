@@ -1541,3 +1541,14 @@
 - 处理结果：账号与领取页验证窗口在持续 false 到原 8 秒观察点时各最多尝试一次官方 Sign in。校验 HTTPS、精确商店主机、默认端口、无用户信息、唯一可见 link、目标同源 `/login` 且同标签页；不读取 Cookie、构造 state 或记录完整链接。旗标在等待前设置，失败或超时不重复点击。整个点击受最多 5 秒及剩余轮询预算约束；其返回值不代表认证，仍必须观察到商店真实 `true`，曾出现 false 后仍禁止账号探测兜底。
 - 验证边界：实际新函数在匿名临时 profile 中 0.50 秒返回“已点击”，随后独立确认同标签身份登录页与空邮箱表单，未提交凭据或购买，profile 已清理。脱敏证据位于忽略目录 `.forensics/store-signin-helper-anonymous`。既有 MFA 提示/导航保留独立超时，整个认证等待不是包含这些操作的严格 45 秒墙钟上限；本轮未扩大其配置。
 - 验证：官方同源链接、唯一/可见/同标签控件、错误 URL 与端口、超时/取消和日志脱敏，以及两个消费者的“最多一次且必须真 true”场景均有回归。授权执行的整合结果为 **308 passed in 5.14s**，Black、Ruff、差异检查通过；独立审计确认核心 URL/状态/取消边界，无需放宽认证成功条件。带已认证账号会话的真实衔接与领取仍待下一次 Actions 验证。
+
+### 2026-10-05 完整真实领取验证通过
+
+- 运行 [#57](https://github.com/Elykia093/epic-freebies-helper/actions/runs/37240487849) 未通过验证码，尚未触发商店衔接；因此在不改代码或模型的情况下，用同一提交 `136c6ddcde7698d6c55b92307335fdc9314b11c6` 进行一次复验。
+- 运行 [#58](https://github.com/Elykia093/epic-freebies-helper/actions/runs/37241446490) 正常成功结束。原始模型缓存确认实际使用 `Qwen/Qwen3-VL-32B-Instruct`，未更换模型。
+- UTC 22:52:01.532 发起官方商店 Sign in 衔接，22:52:04.453 商店标记从 false 变为 true，随后记录 `Epic store session verification success` 和 `Authentication completed`。这次真实验证确认了商店会话衔接路径可用，而不是通过放宽成功条件绕过失败。
+- 本轮两个促销条目均从 Get 进入 Add to library 流程，完成验证后确认 IN LIBRARY：
+  - [System Shock 2: 25th Anniversary Remaster](https://store.epicgames.com/en-US/p/system-shock-2-25th-anniversary-remaster-cb94d9)：UTC 22:53:41 首次确认入库，22:54:12 再次确认。
+  - [BURIED STARS](https://store.epicgames.com/en-US/p/buried-stars-d7c88c)：UTC 22:58:57 首次确认入库，22:59:29 再次确认。
+- 最终记录 `Confirmed 2 instant claim(s)`、`All tasks in the workflow have been completed` 和 `Free games collection completed`，Telegram 摘要发送成功。这里以商品入库状态和完整流程日志验收，不仅依据工作流绿色状态。
+- 本条仅追加验证结果，运行时代码和配置未改变；此前 308 项离线回归与匿名入口验证记录保留。
