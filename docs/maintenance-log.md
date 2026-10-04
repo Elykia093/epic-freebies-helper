@@ -1460,3 +1460,10 @@
   - 接入可选 `GLM_ENABLE_THINKING`、`GLM_THINKING_BUDGET`、`GLM_MAX_TOKENS`，空值不发送，显式 false 保留。模型不自动替换；对支持这些参数的硅基 Qwen 可从 true/1024/2048 开始受控验证，尚未证明该模型严格执行推理上限。
   - 新增耗时、结束原因、输入/输出/思考 token 数和内容长度诊断；不输出响应正文或思考内容。截断、拒答、空白及 schema 校验失败显式转为响应错误，保留已有的有限重试、JSON Mode 降级及不可恢复请求终止路径，不制造默认验证码答案。
   - 回归用例覆盖可选参数、旧响应兼容、不可用响应拒绝、诊断脱敏及真实 Settings 校验。按仓库禁止执行测试的规定，本阶段未运行测试或实际模型/领取请求；仅完成静态验证，真实效果仍待后续授权验证。
+
+
+### 2026-10-05 请求预算修复的授权验证更新
+
+- 用户明确授权本轮测试、合并与启动，覆盖本次验证所需的测试执行限制；未修改仓库 AGENTS.md。
+- 在 Python 3.12.13、锁定依赖环境下执行 `uv run --no-sync pytest -q tests/test_glm_adapter.py tests/test_glm_json_compatibility.py tests/test_llm_errors.py tests/test_llm_budgets_and_diagnostics.py`，结果为 **92 passed in 14.71s**。
+- 覆盖 JSON Mode 降级、不可恢复错误穿透、取消与清理、预算映射和校验、响应拒绝/解析及诊断脱敏。此结果是离线回归证据，真实模型请求和完整领取结果仍待新运行确认。
