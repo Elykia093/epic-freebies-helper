@@ -105,6 +105,7 @@ def auth_module(monkeypatch, tmp_path):
 def login_state(auth_module, monkeypatch):
     clock = FakeClock()
     monkeypatch.setattr(auth_module, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr(auth_module, "start_store_sign_in", AsyncMock(return_value=False))
 
     def build(**page_kwargs):
         page = FakePage(clock, **page_kwargs)
@@ -671,7 +672,7 @@ def test_store_marker_disappearing_after_false_cannot_enable_account_fallback(
 
 
 def test_store_without_any_marker_preserves_positive_order_history_fallback(
-    login_state, monkeypatch
+    auth_module, login_state, monkeypatch
 ):
     auth, _page, clock = login_state(url="https://store.epicgames.com/en-US/free-games")
     auth._get_login_status.return_value = None
@@ -682,9 +683,10 @@ def test_store_without_any_marker_preserves_positive_order_history_fallback(
 
     assert clock.now == 108
     probe.assert_awaited_once()
+    auth_module.start_store_sign_in.assert_not_awaited()
 
 
-def test_store_authenticated_marker_succeeds_immediately(login_state, monkeypatch):
+def test_store_authenticated_marker_succeeds_immediately(auth_module, login_state, monkeypatch):
     auth, _page, clock = login_state(url="https://store.epicgames.com/en-US/free-games")
     auth._get_login_status.return_value = "true"
     probe = AsyncMock(return_value=True)
@@ -695,3 +697,146 @@ def test_store_authenticated_marker_succeeds_immediately(login_state, monkeypatc
     assert clock.now == 100
     auth._get_login_status.assert_awaited_once()
     probe.assert_not_awaited()
+    auth_module.start_store_sign_in.assert_not_awaited()
+
+
+def _sign_in_link(*, href="/login?state=private-state", target=None, count=1, visible=True):
+    return SimpleNamespace(
+        count=AsyncMock(return_value=count),
+        is_visible=AsyncMock(return_value=visible),
+        get_attribute=AsyncMock(
+            side_effect=lambda name, **_kwargs: {"href": href, "target": target}[name]
+        ),
+        click=AsyncMock(),
+    )
+
+
+def test_store_sign_in_uses_only_the_official_same_tab_link_and_redacts_state(auth_module):
+    link = _sign_in_link()
+    page = SimpleNamespace(
+        url="https://store.epicgames.com/en-US/free-games?session=private-session",
+        get_by_role=Mock(return_value=link),
+    )
+
+    assert asyncio.run(auth_module.start_store_sign_in(page, timeout_ms=250)) is True
+
+    page.get_by_role.assert_called_once_with("link", name="Sign in", exact=True)
+    link.click.assert_awaited_once_with(timeout=250, no_wait_after=True)
+    assert "private-" not in "\n".join(auth_module.test_messages)
+    assert "/login?" not in "\n".join(auth_module.test_messages)
+
+
+@pytest.mark.parametrize(
+    "page_url,link_options",
+    [
+        ("http://store.epicgames.com/free-games", {}),
+        ("https://store.epicgames.com.evil.invalid/free-games", {}),
+        ("https://user@store.epicgames.com/free-games", {}),
+        ("https://store.epicgames.com:444/free-games", {}),
+        ("https://store.epicgames.com/free-games", {"href": "https://evil.invalid/login"}),
+        (
+            "https://store.epicgames.com/free-games",
+            {"href": "https://user@store.epicgames.com/login"},
+        ),
+        (
+            "https://store.epicgames.com/free-games",
+            {"href": "https://store.epicgames.com:444/login"},
+        ),
+        ("https://store.epicgames.com/free-games", {"href": "/login#private-state"}),
+        ("https://store.epicgames.com/free-games", {"href": "/logout"}),
+        ("https://store.epicgames.com/free-games", {"target": "_blank"}),
+        ("https://store.epicgames.com/free-games", {"count": 2}),
+        ("https://store.epicgames.com/free-games", {"visible": False}),
+    ],
+)
+def test_store_sign_in_rejects_unsafe_or_ambiguous_targets(auth_module, page_url, link_options):
+    link = _sign_in_link(**link_options)
+    page = SimpleNamespace(url=page_url, get_by_role=Mock(return_value=link))
+
+    assert asyncio.run(auth_module.start_store_sign_in(page)) is False
+
+    link.click.assert_not_awaited()
+    assert "private-" not in "\n".join(auth_module.test_messages)
+
+
+def test_store_sign_in_playwright_error_is_safe_and_not_a_success(auth_module):
+    link = _sign_in_link()
+    link.click.side_effect = auth_module.PlaywrightError("private-state /login?token=private-token")
+    page = SimpleNamespace(
+        url="https://store.epicgames.com/free-games", get_by_role=Mock(return_value=link)
+    )
+
+    assert asyncio.run(auth_module.start_store_sign_in(page)) is False
+
+    link.click.assert_awaited_once()
+    logs = "\n".join(auth_module.test_messages)
+    assert "error_type=Error" in logs
+    assert "private-" not in logs
+
+
+def test_store_sign_in_total_timeout_includes_link_inspection(auth_module):
+    link = _sign_in_link()
+
+    async def stalled_attribute(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    link.get_attribute.side_effect = stalled_attribute
+    page = SimpleNamespace(
+        url="https://store.epicgames.com/free-games", get_by_role=Mock(return_value=link)
+    )
+
+    async def bounded_call():
+        return await asyncio.wait_for(
+            auth_module.start_store_sign_in(page, timeout_ms=10), timeout=1
+        )
+
+    assert asyncio.run(bounded_call()) is False
+    link.click.assert_not_awaited()
+    assert "error_type=TimeoutError" in "\n".join(auth_module.test_messages)
+
+
+@pytest.mark.parametrize(
+    "outcome", ["initiated-only", "authenticated", "not-visible", "click-timeout"]
+)
+def test_store_wait_attempts_one_handoff_but_still_requires_authenticated_dom(
+    auth_module, monkeypatch, outcome
+):
+    clock = FakeClock()
+    monkeypatch.setattr(auth_module, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    page = FakePage(clock, url="https://store.epicgames.com/free-games")
+    link = _sign_in_link(visible=outcome != "not-visible")
+    page.get_by_role = Mock(return_value=link)
+    auth = auth_module.EpicAuthorization(page)
+    marker = {"value": "false"}
+    monkeypatch.setattr(
+        auth, "_get_login_status", AsyncMock(side_effect=lambda **_kwargs: marker["value"])
+    )
+    account_probe = AsyncMock(return_value=True)
+    monkeypatch.setattr(auth, "_has_account_session", account_probe)
+    handoff_times = []
+    original_handoff = auth_module.start_store_sign_in
+
+    async def observe_handoff(*args, **kwargs):
+        handoff_times.append(clock.now)
+        return await original_handoff(*args, **kwargs)
+
+    monkeypatch.setattr(auth_module, "start_store_sign_in", observe_handoff)
+
+    async def click(**_kwargs):
+        if outcome == "authenticated":
+            marker["value"] = "true"
+        if outcome == "click-timeout":
+            raise auth_module.PlaywrightTimeoutError("private-state")
+
+    link.click.side_effect = click
+    if outcome == "authenticated":
+        asyncio.run(auth._ensure_store_session_ready())
+        assert clock.now == 108
+    else:
+        with pytest.raises(RuntimeError, match="did not confirm isloggedin=true"):
+            asyncio.run(auth._ensure_store_session_ready())
+        assert clock.now == 145
+
+    assert handoff_times == [108]
+    assert link.click.await_count == (0 if outcome == "not-visible" else 1)
+    account_probe.assert_not_awaited()

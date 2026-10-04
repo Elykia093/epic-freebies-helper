@@ -11,7 +11,7 @@ import os
 import re
 import time
 from contextlib import suppress
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 
@@ -41,6 +41,51 @@ class EpicManualActionRequiredError(RuntimeError):
 
 class EpicCaptchaBudgetExceededError(RuntimeError):
     pass
+
+
+async def start_store_sign_in(page: Page, *, timeout_ms: int = 5000) -> bool:
+    """Initiate the official store handoff; this is not an authentication result."""
+    if timeout_ms <= 0:
+        return False
+    try:
+        async with asyncio.timeout(timeout_ms / 1000):
+            page_url = page.url
+            current = urlsplit(page_url)
+            if (
+                current.scheme != "https"
+                or current.hostname != "store.epicgames.com"
+                or current.username is not None
+                or current.port not in (None, 443)
+            ):
+                return False
+
+            link = page.get_by_role("link", name="Sign in", exact=True)
+            if await link.count() != 1 or not await link.is_visible():
+                return False
+            href = await link.get_attribute("href", timeout=timeout_ms)
+            target = await link.get_attribute("target", timeout=timeout_ms)
+            if not isinstance(href, str) or target not in (None, "", "_self"):
+                return False
+            destination = urlsplit(urljoin(page_url, href))
+            if (
+                destination.scheme != "https"
+                or destination.hostname != "store.epicgames.com"
+                or destination.username is not None
+                or destination.port not in (None, 443)
+                or destination.path != "/login"
+                or destination.fragment
+                or page.url != page_url
+            ):
+                return False
+
+            logger.info("Starting the official Epic Store Sign in handoff")
+            await link.click(timeout=timeout_ms, no_wait_after=True)
+            return True
+    except (TimeoutError, PlaywrightError, ValueError) as err:
+        logger.warning(
+            "Epic Store Sign in handoff did not finish | error_type={}", type(err).__name__
+        )
+        return False
 
 
 class EpicAuthorization:
@@ -791,6 +836,7 @@ class EpicAuthorization:
         account_probe_at = time.monotonic() + 8
         account_probe_attempted = False
         saw_signed_out_marker = False
+        store_signin_attempted = False
 
         while time.monotonic() < deadline:
             if self._needs_privacy_policy_correction():
@@ -818,6 +864,19 @@ class EpicAuthorization:
                         "the authenticated store state within the existing timeout"
                     )
                 saw_signed_out_marker = True
+
+            remaining = deadline - time.monotonic()
+            if (
+                status == "false"
+                and not store_signin_attempted
+                and time.monotonic() >= account_probe_at
+                and remaining > 0
+            ):
+                store_signin_attempted = True
+                await start_store_sign_in(
+                    self.page, timeout_ms=max(1, min(5000, int(remaining * 1000)))
+                )
+                continue
 
             if (
                 not saw_signed_out_marker
