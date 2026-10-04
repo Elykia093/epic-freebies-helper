@@ -1437,3 +1437,11 @@
   - 中英文 README 增加硅基流动配置位置、覆盖项检查及降级边界，无需新增配置变量。
   - 新增 HTTP MockTransport 与异步边界回归用例，覆盖降级次数、图像及 schema 保留、缓存隔离、最终答案解析、永久/瞬态错误、资源关闭和取消。
   - 按 AGENTS.md 禁止执行测试的规定，未运行测试、真实模型请求或 Epic 领取；验证限于 Ruff、Black、Python 3.12 语法检查、差异检查及独立静态审计。该改动不宣称解决此前 code 20015 / 151652 图像消息错误，也不保证验证码通过率。
+
+### 2026-10-03 Actions 显式使用 Playwright Firefox 避开 Camoufox 启动不兼容
+
+- 现象：运行 #47（37132812179）已使用合并后的 `2e388cc`，但在模型调用之前因 `Unknown property navigator.appCodeName in config` 退出。
+- 根因判断：锁定的 Camoufox Python 包为 0.4.11，而下载的浏览器为 156.0.1-beta.33，启动配置校验出现不兼容；`auto` 降级规则未识别 `UnknownProperty`，没有使用已经安装的备用 Firefox。GeoIP 下载另有 GitHub 403，不能将其认定为该配置异常的原因。
+- 改动文件：`.github/workflows/epic-gamer.yml`、`docs/maintenance-log.md`。
+- 处理结果：Actions 的 `BROWSER_BACKEND` 从 `auto` 改为 `playwright`，直接使用工作流已安装的 Playwright Firefox。模型路由、凭据、登录及领取逻辑不变；不调整本地或 Docker 的默认后端，也不扩大自动降级的异常范围。
+- 验证：核对安装步骤、环境变量与后端选择路径，完成 YAML 语法及差异检查。按 AGENTS.md 未执行测试、浏览器登录、模型请求或领取；仍需合并后运行验证，不能据此保证完整领取成功。
