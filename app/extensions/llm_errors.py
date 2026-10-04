@@ -17,6 +17,10 @@ class LLMConfigurationError(RuntimeError):
     """An LLM request cannot succeed without changing its configuration."""
 
 
+class LLMResponseError(ValueError):
+    """A response was received, but cannot safely be used as a challenge answer."""
+
+
 @asynccontextmanager
 async def llm_request_boundary() -> AsyncIterator[None]:
     """Convert abort signals after inner browser contexts have finished cleanup."""

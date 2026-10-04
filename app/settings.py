@@ -60,7 +60,12 @@ class EpicSettings(AgentConfig):
     )
 
     GLM_MODEL: str = Field(default="glm-4.6v", description="GLM vision-capable default model")
-    GLM_REQUEST_TIMEOUT_SECONDS: float = Field(default=50.0, gt=5.0, le=120.0)
+    GLM_REQUEST_TIMEOUT_SECONDS: float = Field(default=50.0, gt=5.0, le=120.0, allow_inf_nan=False)
+    GLM_ENABLE_THINKING: bool | None = Field(
+        default=None, description="Optional enable_thinking parameter for compatible endpoints"
+    )
+    GLM_THINKING_BUDGET: int | None = Field(default=None, ge=128, le=32768)
+    GLM_MAX_TOKENS: int | None = Field(default=None, ge=1)
 
     BROWSER_BACKEND: str = Field(
         default="auto", description="Supported values: auto, camoufox, playwright"
@@ -79,6 +84,8 @@ class EpicSettings(AgentConfig):
         default=False,
         description="Disable hcaptcha-challenger recursive retries; callers own retry limits.",
     )
+    EXECUTION_TIMEOUT: float = Field(default=120.0, gt=0, allow_inf_nan=False)
+    RESPONSE_TIMEOUT: float = Field(default=30.0, gt=0, allow_inf_nan=False)
     WAIT_FOR_CHALLENGE_VIEW_TO_RENDER_MS: int = Field(default=3000)
 
     CHALLENGE_CLASSIFIER_MODEL: str = Field(default="")
@@ -140,6 +147,18 @@ class EpicSettings(AgentConfig):
         if provider not in {"gemini", "glm"}:
             provider = "glm" if self.GLM_API_KEY else "gemini"
         self.LLM_PROVIDER = provider
+
+        if provider == "glm":
+            # The provider allows two attempts with one three-second retry delay.
+            # This minimum does not include all browser work or multiple captcha rounds.
+            minimum_execution_timeout = 2 * self.GLM_REQUEST_TIMEOUT_SECONDS + 3
+            if self.EXECUTION_TIMEOUT < minimum_execution_timeout:
+                raise ValueError(
+                    f"EXECUTION_TIMEOUT must be at least {minimum_execution_timeout:g} seconds "
+                    "for two GLM request attempts and a 3-second retry delay "
+                    f"(GLM_REQUEST_TIMEOUT_SECONDS={self.GLM_REQUEST_TIMEOUT_SECONDS:g}). "
+                    "This is a minimum budget, not a guarantee that all captcha rounds finish."
+                )
 
         if self.GEMINI_API_KEY is None and self.GLM_API_KEY is not None:
             self.GEMINI_API_KEY = self.GLM_API_KEY

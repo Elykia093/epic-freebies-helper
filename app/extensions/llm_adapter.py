@@ -6,14 +6,15 @@ import mimetypes
 import re
 from contextlib import suppress
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import httpx
 from hcaptcha_challenger.models import ChallengeTypeEnum, RequestType
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
-from extensions.llm_errors import LLMRequestAbort
+from extensions.llm_errors import LLMRequestAbort, LLMResponseError
 
 CHALLENGE_TYPE_VALUES = frozenset(member.value for member in ChallengeTypeEnum)
 REQUEST_TYPE_VALUES = frozenset(member.value for member in RequestType)
@@ -1070,6 +1071,51 @@ def _json_mode_is_unsupported(response: httpx.Response) -> bool:
     return code == "20024" or "json mode is not supported" in message.casefold()
 
 
+def _response_diagnostics(data: Any) -> dict[str, Any]:
+    """Keep response timing/usage diagnostics free of generated or input text."""
+    data = data if isinstance(data, dict) else {}
+    choices = data.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices else {}
+    choice = choice if isinstance(choice, dict) else {}
+    message = choice.get("message")
+    message = message if isinstance(message, dict) else {}
+    usage = data.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    details = usage.get("completion_tokens_details")
+    details = details if isinstance(details, dict) else {}
+
+    def token_count(value: Any) -> int | None:
+        return value if type(value) is int and value >= 0 else None
+
+    content = message.get("content")
+    if isinstance(content, list):
+        content = "".join(
+            item["text"]
+            for item in content
+            if isinstance(item, dict)
+            and item.get("type") == "text"
+            and isinstance(item.get("text"), str)
+        )
+    reasoning = message.get("reasoning_content")
+    finish_reason = choice.get("finish_reason")
+    known_reasons = {"stop", "length", "max_tokens", "content_filter", "safety", "tool_calls"}
+    return {
+        "finish_reason": (
+            finish_reason
+            if isinstance(finish_reason, str) and finish_reason in known_reasons
+            else "unknown"
+        ),
+        "input_tokens": token_count(usage.get("prompt_tokens")),
+        "output_tokens": token_count(usage.get("completion_tokens")),
+        "reasoning_tokens": token_count(
+            details.get("reasoning_tokens", usage.get("reasoning_tokens"))
+        ),
+        "content_chars": len(content) if isinstance(content, str) else 0,
+        "reasoning_chars": len(reasoning) if isinstance(reasoning, str) else 0,
+        "has_refusal": bool(message.get("refusal")),
+    }
+
+
 class _GLMAsyncModels:
     def __init__(self, settings: Any, storage: dict[str, dict[str, Any]]):
         self._settings = settings
@@ -1173,6 +1219,15 @@ class _GLMAsyncModels:
         if thinking_payload := _glm_thinking_payload(model, config):
             payload["thinking"] = thinking_payload
 
+        for field, parameter in (
+            ("GLM_ENABLE_THINKING", "enable_thinking"),
+            ("GLM_THINKING_BUDGET", "thinking_budget"),
+            ("GLM_MAX_TOKENS", "max_tokens"),
+        ):
+            value = getattr(self._settings, field, None)
+            if value is not None:
+                payload[parameter] = value
+
         payload.update({k: v for k, v in kwargs.items() if k not in {"config"}})
         return payload
 
@@ -1218,7 +1273,9 @@ class _GLMAsyncModels:
                         text,
                     )
                 else:
-                    logger.warning("GLM structured parse fallback failed | raw_text={}", text[:500])
+                    logger.warning(
+                        "GLM structured parse fallback failed | content_chars={}", len(text)
+                    )
                     return None
 
         if isinstance(schema, type) and issubclass(schema, BaseModel):
@@ -1268,6 +1325,7 @@ class _GLMAsyncModels:
         }
 
         request_timeout = float(self._settings.GLM_REQUEST_TIMEOUT_SECONDS)
+        started_at = monotonic()
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(request_timeout, connect=min(30.0, request_timeout))
         ) as client:
@@ -1286,6 +1344,12 @@ class _GLMAsyncModels:
                     )
                     response = await client.post(endpoint, headers=headers, json=payload)
             except httpx.TimeoutException as err:
+                logger.warning(
+                    "LLM request timeout | elapsed_seconds={:.2f} | phase={} | timeout_seconds={}",
+                    monotonic() - started_at,
+                    type(err).__name__,
+                    request_timeout,
+                )
                 raise TimeoutError(
                     f"GLM request timed out after {request_timeout:g} seconds "
                     f"({type(err).__name__})"
@@ -1301,8 +1365,56 @@ class _GLMAsyncModels:
                 response.raise_for_status()
             data = response.json()
 
-        text = _normalize_glm_response_text(self._extract_text(data))
-        parsed = self._parse_response(text, config)
+        diagnostics = _response_diagnostics(data)
+        elapsed = monotonic() - started_at
+        logger.info("LLM response | elapsed_seconds={:.2f} | {}", elapsed, diagnostics)
+        finish_reason = diagnostics["finish_reason"]
+        if finish_reason in {"length", "max_tokens"}:
+            raise LLMResponseError(
+                "LLM response was truncated; check GLM_MAX_TOKENS, reasoning budget and input size "
+                f"(finish_reason={finish_reason})."
+            )
+        if diagnostics["has_refusal"] or finish_reason in {"content_filter", "safety"}:
+            raise LLMResponseError(
+                "LLM response was refused or filtered; no challenge answer available."
+            )
+        if diagnostics["content_chars"] == 0:
+            raise LLMResponseError(
+                f"LLM returned no final answer (finish_reason={finish_reason}, "
+                f"reasoning_chars={diagnostics['reasoning_chars']})."
+            )
+        try:
+            text = _normalize_glm_response_text(self._extract_text(data))
+            if not text:
+                raise LLMResponseError(
+                    f"LLM returned an empty final answer (finish_reason={finish_reason})."
+                )
+            parsed = self._parse_response(text, config)
+        except ValidationError as err:
+            errors = err.errors(include_input=False, include_context=False, include_url=False)
+            schema_fields = _schema_field_names(getattr(config, "response_schema", None))
+            fields = sorted(
+                {
+                    str(item["loc"][0])
+                    for item in errors
+                    if item["loc"] and item["loc"][0] in schema_fields
+                }
+            )
+            raise LLMResponseError(
+                f"LLM response failed schema validation (finish_reason={finish_reason}, "
+                f"error_count={len(errors)}, fields={','.join(fields) or 'unknown'})."
+            ) from None
+        except LLMResponseError:
+            raise
+        except (ValueError, TypeError, KeyError) as err:
+            raise LLMResponseError(
+                f"LLM final answer could not be parsed (finish_reason={finish_reason}, "
+                f"error_type={type(err).__name__})."
+            ) from None
+        if getattr(config, "response_schema", None) is not None and parsed is None:
+            raise LLMResponseError(
+                f"LLM final answer did not contain the required structured response (finish_reason={finish_reason})."
+            )
         return _PatchedResponse(text=text, parsed=parsed, raw=data)
 
 
