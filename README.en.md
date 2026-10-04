@@ -179,6 +179,8 @@ Qwen3-VL requests also include the question text from the challenge payload, so 
 
 After login and on a newly opened claim page, the existing 45-second window waits for the store's `isloggedin=true` instead of immediately discarding the session on an initial `false` during loading. Once `false` has been observed, only a subsequent store marker of `true` can confirm success; an account order-history probe cannot override it. The attempt still fails if the wait expires. Pages where the store marker never appears retain the existing account-session fallback.
 
+If the account portal is authenticated but the store still reports signed out, each verification window can initiate the official Sign in link once after the existing 8-second observation point. Only a same-origin HTTPS store `/login` link with same-tab navigation is accepted; callback parameters are not invented and cookies are not copied. A completed click still requires a subsequent store marker of `true`. The complete click operation is limited to 5 seconds and the remaining polling budget. Existing MFA handling and navigation retain their separate limits, so 45 seconds is not a strict total wall-clock cap including those operations.
+
 If you use the `official Gemini API`, use this set:
 
 **If you set `LLM_PROVIDER=gemini`, you must provide `GEMINI_API_KEY`; there is no need to create or fill `GLM_API_KEY`.**

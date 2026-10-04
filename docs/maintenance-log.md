@@ -1532,3 +1532,12 @@
 - 改动文件：`app/services/epic_authorization_service.py`、`app/services/epic_games_service.py`、`tests/test_login_outcome.py`、`tests/test_checkout_state_machine.py`、中英文 README 及本维护日志。
 - 处理结果：两条路径都在原有窗口内等待真实 `true`，不增加默认超时或轮询间隔。见过 `false` 后禁止订单探测兜底，包括随后变成无标记的情况；认证检查到期抛错，领取页检查到期返回原契约的 `"false"`，消费者仍明确失败。完全没有 `false` 的缺失标记场景保留原有正向账号会话验证，MFA/隐私确认和订单逻辑不变。
 - 验证：两条实际 helper 及领取消费者分别覆盖 false→true、持续 false、false→None、缺标记正向兜底和立即 true；持续 false 即使账号探测可成功也不能进入订单流程。授权执行的整合回归共 **285 passed in 4.87s**，Black、Ruff、差异检查通过，独立审计覆盖 deploy/Celery 新页面调用链，无阻断项。真实商店状态是否完成同步及入库结果仍由下一次运行确认。
+
+### 2026-10-05 通过官方商店入口衔接已认证的账号会话
+
+- 现象：运行 #56（37237747767，提交 `c4ee53683a726b52f8539331ee03734dfb3100d7`）再次完成邮箱及密码验证码、`Login success` 和账号附加验证，但商店标记等待完整 45 秒仍为未登录，完整加载后的截图也显示 Sign in。因此不能继续归因为首次读取太早，更不能延长等待或放宽成功条件。
+- 根因判断：当前登录从账户门户 `account/personal` 开始，成功后仅直接访问免费游戏页，没有执行商店自己的登录入口。两次独立无账号浏览器观察确认，官方 Sign in 是唯一可见链接，指向商店同源 `/login`（参数名 lang/state），实际 HTTP 302 到 Epic 身份登录页，携带返回商店的回调；无 popup，空邮箱表单可见。此证据确认了缺少的衔接路径，但不单独证明它是登录失败的唯一原因。
+- 改动文件：`app/services/epic_authorization_service.py`、`app/services/epic_games_service.py`、对应登录/领取状态回归、中英文 README 及本维护日志。
+- 处理结果：账号与领取页验证窗口在持续 false 到原 8 秒观察点时各最多尝试一次官方 Sign in。校验 HTTPS、精确商店主机、默认端口、无用户信息、唯一可见 link、目标同源 `/login` 且同标签页；不读取 Cookie、构造 state 或记录完整链接。旗标在等待前设置，失败或超时不重复点击。整个点击受最多 5 秒及剩余轮询预算约束；其返回值不代表认证，仍必须观察到商店真实 `true`，曾出现 false 后仍禁止账号探测兜底。
+- 验证边界：实际新函数在匿名临时 profile 中 0.50 秒返回“已点击”，随后独立确认同标签身份登录页与空邮箱表单，未提交凭据或购买，profile 已清理。脱敏证据位于忽略目录 `.forensics/store-signin-helper-anonymous`。既有 MFA 提示/导航保留独立超时，整个认证等待不是包含这些操作的严格 45 秒墙钟上限；本轮未扩大其配置。
+- 验证：官方同源链接、唯一/可见/同标签控件、错误 URL 与端口、超时/取消和日志脱敏，以及两个消费者的“最多一次且必须真 true”场景均有回归。授权执行的整合结果为 **308 passed in 5.14s**，Black、Ruff、差异检查通过；独立审计确认核心 URL/状态/取消边界，无需放宽认证成功条件。带已认证账号会话的真实衔接与领取仍待下一次 Actions 验证。

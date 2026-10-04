@@ -1,6 +1,6 @@
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -542,6 +542,8 @@ def test_claim_page_login_wait_only_allows_verified_sessions_to_check_orders(
     page.url = "https://store.epicgames.com/en-US/free-games"
     agent = EpicAgent(page)
     monkeypatch.setattr(epic_games_service, "time", SimpleNamespace(monotonic=clock.monotonic))
+    handoff = AsyncMock(return_value=False)
+    monkeypatch.setattr(epic_games_service, "start_store_sign_in", handoff)
 
     async def marker(**_kwargs):
         if scenario == "false_then_true":
@@ -579,6 +581,7 @@ def test_claim_page_login_wait_only_allows_verified_sessions_to_check_orders(
     assert returned_states == [expected_status]
     assert clock.value == expected_elapsed
     assert account_probe.await_count == expected_account_probes
+    assert handoff.await_count == (1 if scenario in {"false_then_true", "always_false"} else 0)
     if expected_status == "true":
         assert agent._ctx_cookies_is_available is True
         assert order_checks == [expected_elapsed]
@@ -587,3 +590,68 @@ def test_claim_page_login_wait_only_allows_verified_sessions_to_check_orders(
         assert agent._ctx_cookies_is_available is False
         assert order_checks == []
         assert ignored is False
+
+
+@pytest.mark.parametrize(
+    "outcome", ["initiated-only", "authenticated", "not-visible", "click-timeout"]
+)
+def test_claim_page_handoff_is_attempted_once_and_cannot_replace_dom_authentication(
+    monkeypatch, outcome
+):
+    clock = FakeClock()
+    monkeypatch.setattr(epic_games_service, "time", SimpleNamespace(monotonic=clock.monotonic))
+    page = FakePage(clock)
+    page.url = "https://store.epicgames.com/free-games"
+    link = SimpleNamespace(
+        count=AsyncMock(return_value=1),
+        is_visible=AsyncMock(return_value=outcome != "not-visible"),
+        get_attribute=AsyncMock(
+            side_effect=lambda name, **_kwargs: {
+                "href": "/login?state=offline-state",
+                "target": None,
+            }[name]
+        ),
+        click=AsyncMock(),
+    )
+    page.get_by_role = Mock(return_value=link)
+    agent = EpicAgent(page)
+    marker = {"value": "false"}
+    monkeypatch.setattr(
+        agent, "_get_login_status", AsyncMock(side_effect=lambda **_kwargs: marker["value"])
+    )
+    account_probe = AsyncMock(return_value=True)
+    check_orders = AsyncMock()
+    monkeypatch.setattr(agent, "_has_account_session", account_probe)
+    monkeypatch.setattr(agent, "_goto_claim_page", AsyncMock())
+    monkeypatch.setattr(agent, "_check_orders", check_orders)
+    handoff_times = []
+    original_handoff = epic_games_service.start_store_sign_in
+
+    async def observe_handoff(*args, **kwargs):
+        handoff_times.append(clock.value)
+        return await original_handoff(*args, **kwargs)
+
+    monkeypatch.setattr(epic_games_service, "start_store_sign_in", observe_handoff)
+
+    async def click(**_kwargs):
+        if outcome == "authenticated":
+            marker["value"] = "true"
+        if outcome == "click-timeout":
+            raise epic_games_service.PlaywrightTimeoutError("offline timeout")
+
+    link.click.side_effect = click
+    ignored = asyncio.run(agent._should_ignore_task())
+
+    assert handoff_times == [8]
+    assert link.click.await_count == (0 if outcome == "not-visible" else 1)
+    account_probe.assert_not_awaited()
+    if outcome == "authenticated":
+        assert clock.value == 8
+        assert ignored is True
+        assert agent._ctx_cookies_is_available is True
+        check_orders.assert_awaited_once()
+    else:
+        assert clock.value == 45
+        assert ignored is False
+        assert agent._ctx_cookies_is_available is False
+        check_orders.assert_not_awaited()

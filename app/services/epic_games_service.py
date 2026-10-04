@@ -25,7 +25,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt
 from extensions.hcaptcha_runtime import wait_for_challenge_signal
 from models import OrderItem, Order
 from models import PromotionGame
-from services.epic_authorization_service import EpicManualActionRequiredError
+from services.epic_authorization_service import EpicManualActionRequiredError, start_store_sign_in
 from settings import settings, RUNTIME_DIR
 
 URL_CLAIM = "https://store.epicgames.com/en-US/free-games"
@@ -188,6 +188,7 @@ class EpicAgent:
         account_probe_at = time.monotonic() + 8
         account_probe_attempted = False
         saw_signed_out_marker = False
+        store_signin_attempted = False
 
         while time.monotonic() < deadline:
             if self._needs_privacy_policy_correction():
@@ -210,6 +211,19 @@ class EpicAgent:
                         "the authenticated store state within the existing timeout"
                     )
                 saw_signed_out_marker = True
+
+            remaining = deadline - time.monotonic()
+            if (
+                status == "false"
+                and not store_signin_attempted
+                and time.monotonic() >= account_probe_at
+                and remaining > 0
+            ):
+                store_signin_attempted = True
+                await start_store_sign_in(
+                    self.page, timeout_ms=max(1, min(5000, int(remaining * 1000)))
+                )
+                continue
 
             if (
                 not saw_signed_out_marker
