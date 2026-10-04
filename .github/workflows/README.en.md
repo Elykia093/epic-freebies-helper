@@ -16,10 +16,12 @@ The workflow runs the following steps on a GitHub-hosted runner:
 1. Check out the repository.
 2. Install `uv` and Python 3.12.
 3. Install system dependencies.
-4. Run `uv sync` to install Python dependencies.
-5. Attempt to download Camoufox browser assets; this step may fail without stopping the workflow.
-6. Install Playwright Firefox, the browser backend explicitly selected for Actions.
-7. Run `uv run app/deploy.py` inside `xvfb` with `BROWSER_BACKEND=playwright` and `HEADLESS=virtual`.
+4. Run `uv sync --frozen` to install locked Python dependencies.
+5. Run `camoufox set --release`, then use the official `launch_path()` to download and check the executable. Verify that `installed_verstr()` matches the package pin and record the final selection with `camoufox active`. Installation failure or a version mismatch stops the job. This step is skipped when `playwright` is explicitly selected.
+6. Install Playwright Firefox for explicit selection of that backend.
+7. Run `uv run --no-sync app/deploy.py` inside `xvfb` with `BROWSER_BACKEND=camoufox` by default and `HEADLESS=virtual`. Set the repository Variable `BROWSER_BACKEND` to `playwright` to roll back the backend.
+
+Camoufox is pinned to 0.5.7 with its paired browser `156.0.1-beta.34`, avoiding the previous mismatch between the Python package and the downloaded browser. Successful startup does not establish that Epic accepted authentication; verify the login and library results separately.
 
 The workflow is triggered by GitHub `schedule` and `workflow_dispatch`. APScheduler inside the repository is disabled in this mode to avoid duplicate scheduling.
 
