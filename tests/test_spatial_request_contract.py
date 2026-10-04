@@ -364,6 +364,50 @@ def test_qwen_drag_maps_both_endpoints_before_source_correction_and_execution(dr
     flow.arm.click_by_mouse.assert_awaited_once()
 
 
+@pytest.mark.parametrize(
+    "bad_coords",
+    [None, [], ["59.5", 55], [float("nan"), 55], [float("inf"), 55], [59.5, 55], [-1, 55]],
+)
+def test_bad_payload_coordinates_reach_model_and_preserve_its_drag_paths(
+    drag_flow, monkeypatch, bad_coords
+):
+    real_line_solver = adapter._resolve_line_path
+    real_outline_solver = adapter._resolve_outline_paths
+    coordinates = [((100, 200), (700, 800)), ((200, 300), (600, 700))]
+    flow = drag_flow(coordinates)
+    monkeypatch.setattr(adapter, "_resolve_line_path", real_line_solver)
+    monkeypatch.setattr(adapter, "_resolve_outline_paths", real_outline_solver)
+    flow.arm._match_user_prompt = lambda _job: "Put animals into matching outlines"
+    flow.arm.captcha_payload = SimpleNamespace(
+        tasklist=[
+            SimpleNamespace(
+                entities=[
+                    SimpleNamespace(coords=[59, 55], size=[85, 85]),
+                    SimpleNamespace(coords=bad_coords, size=[85, 85]),
+                ]
+            )
+        ],
+        get_requester_question=lambda: "Put animals into matching outlines",
+    )
+
+    def unexpected_network(*_args, **_kwargs):
+        raise AssertionError("Unsafe local geometry must not download entity images")
+
+    monkeypatch.setattr(adapter.httpx, "AsyncClient", unexpected_network)
+
+    flow.run()
+
+    expected = [((1250, 880), (1550, 1120)), ((1300, 920), (1500, 1080))]
+    assert len(flow.requests) == 1
+    assert flow.uploads == [flow.raw]
+    assert flow.correction_inputs == [expected]
+    executed = [call.args[0] for call in flow.arm._perform_drag_drop.await_args_list]
+    assert _path_pairs(executed) == expected
+    assert flow.validations == [[(1250, 880), (1550, 1120), (1300, 920), (1500, 1080)]]
+    assert _path_pairs(flow.answer.paths) == coordinates
+    flow.arm.click_by_mouse.assert_awaited_once()
+
+
 @pytest.mark.parametrize("local_solver", ["line", "outline"])
 def test_local_drag_solution_keeps_page_coordinates_and_skips_model(drag_flow, local_solver):
     coordinates = [((1250, 880), (1550, 1120))]

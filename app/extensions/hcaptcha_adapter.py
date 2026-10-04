@@ -3,6 +3,7 @@ import asyncio
 import itertools
 import json
 from contextlib import suppress
+from math import ceil, floor, isfinite
 from pathlib import Path
 from typing import Any
 
@@ -280,10 +281,18 @@ def _entity_centers(captcha_payload: Any, crumb_id: int) -> list[tuple[int, int]
 
     centers: list[tuple[int, int]] = []
     for entity in getattr(tasklist[crumb_id], "entities", None) or []:
-        coords = getattr(entity, "coords", None) or []
-        if len(coords) < 2:
+        coords = getattr(entity, "coords", None)
+        if not isinstance(coords, (list, tuple)) or len(coords) != 2:
             return []
-        centers.append((int(coords[0]), int(coords[1])))
+        try:
+            if any(
+                isinstance(value, bool) or not isfinite(value) or value < 0 or int(value) != value
+                for value in coords
+            ):
+                return []
+            centers.append((int(coords[0]), int(coords[1])))
+        except (TypeError, ValueError, OverflowError):
+            return []
     return centers
 
 
@@ -360,8 +369,41 @@ def _correct_drag_source_points(
     return paths
 
 
+def _source_entity_rectangles(
+    entities: list[Any], *, canvas_width: int, canvas_height: int
+) -> list[tuple[float, float, float, float]] | None:
+    """Read source rectangles in task-canvas coordinates without guessing their side."""
+    if not entities:
+        return None
+    rectangles = []
+    for entity in entities:
+        coords = getattr(entity, "coords", None)
+        size = getattr(entity, "size", None)
+        if not isinstance(coords, (list, tuple)) or not isinstance(size, (list, tuple)):
+            return None
+        if len(coords) != 2 or len(size) != 2:
+            return None
+        raw_values = (*coords, *size)
+        try:
+            if any(isinstance(value, bool) or not isfinite(value) for value in raw_values):
+                return None
+            center_x, center_y, width, height = map(float, raw_values)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not all(isfinite(value) for value in (center_x, center_y, width, height)):
+            return None
+        if width <= 0 or height <= 0:
+            return None
+        left, top = center_x - width / 2, center_y - height / 2
+        right, bottom = center_x + width / 2, center_y + height / 2
+        if not (0 <= left < right <= canvas_width and 0 <= top < bottom <= canvas_height):
+            return None
+        rectangles.append((left, top, right, bottom))
+    return rectangles
+
+
 def _extract_outline_targets(
-    challenge_screenshot: Path,
+    challenge_screenshot: Path, *, source_entities: list[Any]
 ) -> list[tuple[np.ndarray, tuple[float, float]]]:
     image = cv2.imread(str(challenge_screenshot))
     canvas_origin = _detect_task_canvas_origin(challenge_screenshot)
@@ -370,9 +412,18 @@ def _extract_outline_targets(
 
     origin_x, origin_y = canvas_origin
     task_canvas = image[origin_y:, origin_x:]
+    source_rectangles = _source_entity_rectangles(
+        source_entities,
+        canvas_width=task_canvas.shape[1],
+        canvas_height=task_canvas.shape[0],
+    )
+    if source_rectangles is None:
+        logger.warning("Could not establish hCaptcha draggable source regions; falling back to LLM")
+        return []
     hsv = cv2.cvtColor(task_canvas, cv2.COLOR_BGR2HSV)
     outline_mask = ((hsv[:, :, 1] < 100) & (hsv[:, :, 2] > 140)).astype(np.uint8) * 255
-    outline_mask[:, int(task_canvas.shape[1] * 0.68) :] = 0
+    for left, top, right, bottom in source_rectangles:
+        outline_mask[floor(top) : ceil(bottom), floor(left) : ceil(right)] = 0
     outline_mask = cv2.morphologyEx(outline_mask, cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8))
 
     count, labels, stats, _ = cv2.connectedComponentsWithStats(outline_mask)
@@ -381,7 +432,10 @@ def _extract_outline_targets(
         x, y, width, height, area = (int(value) for value in stats[index])
         if not (400 <= area <= 3000 and width >= 35 and height >= 35):
             continue
-        if x >= task_canvas.shape[1] * 0.68 or y >= task_canvas.shape[0] * 0.88:
+        if any(
+            x < right and x + width > left and y < bottom and y + height > top
+            for left, top, right, bottom in source_rectangles
+        ):
             continue
 
         component = (labels == index).astype(np.uint8) * 255
@@ -608,14 +662,16 @@ async def _resolve_outline_paths(
     if "outline" not in question:
         return None
 
+    targets = _extract_outline_targets(challenge_screenshot, source_entities=entities)
+    if len(targets) < len(entities):
+        return None
     source_points = _payload_source_points(
         captcha_payload=captcha_payload,
         crumb_id=crumb_id,
         challenge_screenshot=challenge_screenshot,
         challenge_bbox=challenge_bbox,
     )
-    targets = _extract_outline_targets(challenge_screenshot)
-    if len(source_points) != len(entities) or len(targets) < len(entities):
+    if len(source_points) != len(entities):
         return None
 
     try:

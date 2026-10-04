@@ -28,6 +28,7 @@ from settings import SCREENSHOTS_DIR, settings
 
 URL_CLAIM = "https://store.epicgames.com/en-US/free-games"
 URL_ORDER_HISTORY = "https://www.epicgames.com/account/v2/payment/ajaxGetOrderHistory"
+LOGIN_CAPTCHA_ATTEMPT_LIMIT = 3
 
 
 class EpicAuthenticationFatalError(RuntimeError):
@@ -35,6 +36,10 @@ class EpicAuthenticationFatalError(RuntimeError):
 
 
 class EpicManualActionRequiredError(RuntimeError):
+    pass
+
+
+class EpicCaptchaBudgetExceededError(RuntimeError):
     pass
 
 
@@ -49,6 +54,21 @@ class EpicAuthorization:
         self._totp_attempts = 0
         self._invalid_totp_rejections = 0
         self._last_captcha_totp_refresh_at = 0.0
+        self._captcha_solve_attempts = 0
+
+    async def _wait_for_login_challenge(
+        self, agent: AgentV, *, context: str, timeout_seconds: float
+    ) -> ChallengeSignal:
+        """Share one solve-call budget across all waits in a password login attempt."""
+        if self._captcha_solve_attempts >= LOGIN_CAPTCHA_ATTEMPT_LIMIT:
+            raise EpicCaptchaBudgetExceededError(
+                "Login captcha solve budget exhausted "
+                f"({LOGIN_CAPTCHA_ATTEMPT_LIMIT} attempts in one authentication attempt)."
+            )
+        self._captcha_solve_attempts += 1
+        return await wait_for_challenge_signal(
+            agent, context=context, timeout_seconds=timeout_seconds
+        )
 
     @staticmethod
     def _id_api_endpoint(url: str) -> str | None:
@@ -622,7 +642,7 @@ class EpicAuthorization:
                 extend_deadline("captcha-visible", 180)
                 challenge_solved = False
                 try:
-                    challenge_signal = await wait_for_challenge_signal(
+                    challenge_signal = await self._wait_for_login_challenge(
                         agent,
                         context="login_mfa",
                         timeout_seconds=min(
@@ -641,6 +661,8 @@ class EpicAuthorization:
                             challenge_signal.value,
                             self.page.url,
                         )
+                except EpicCaptchaBudgetExceededError:
+                    raise
                 except Exception as err:
                     logger.warning(
                         "Login captcha solve attempt failed during authentication outcome | err={!r}",
@@ -816,6 +838,7 @@ class EpicAuthorization:
         )
 
     async def _login(self) -> bool | None:
+        self._captcha_solve_attempts = 0
         # 尽可能早地初始化机器人
         agent = AgentV(page=self.page, agent_config=settings)
 
@@ -848,17 +871,23 @@ class EpicAuthorization:
             await self._submit_login_or_accept_challenge()
 
             login_confirmed = False
-            for challenge_attempt in range(1, 4):
-                logger.debug("Solving login challenge attempt {}/3", challenge_attempt)
+            for challenge_attempt in range(1, LOGIN_CAPTCHA_ATTEMPT_LIMIT + 1):
+                logger.debug(
+                    "Solving login challenge attempt {}/{}",
+                    challenge_attempt,
+                    LOGIN_CAPTCHA_ATTEMPT_LIMIT,
+                )
                 challenge_signal = ChallengeSignal.FAILURE
                 try:
-                    challenge_signal = await wait_for_challenge_signal(
+                    challenge_signal = await self._wait_for_login_challenge(
                         agent,
                         context=f"login:{challenge_attempt}",
                         timeout_seconds=(
                             settings.EXECUTION_TIMEOUT + settings.RESPONSE_TIMEOUT + 5
                         ),
                     )
+                except EpicCaptchaBudgetExceededError:
+                    raise
                 except Exception:
                     pass
 
@@ -875,17 +904,22 @@ class EpicAuthorization:
                     if await self._has_active_hcaptcha_challenge():
                         logger.warning(
                             "Login outcome timed out while captcha is still visible; "
-                            "retrying solve attempt {}/3 | signal={}",
+                            "retrying solve attempt {}/{} | signal={}",
                             challenge_attempt,
+                            LOGIN_CAPTCHA_ATTEMPT_LIMIT,
                             challenge_signal.value,
                         )
                         continue
 
-                    if challenge_attempt < 3 and await self._resubmit_password_form():
+                    if (
+                        challenge_attempt < LOGIN_CAPTCHA_ATTEMPT_LIMIT
+                        and await self._resubmit_password_form()
+                    ):
                         logger.warning(
                             "Login captcha disappeared without authentication; resubmitted the "
-                            "password form before solve attempt {}/3",
+                            "password form before solve attempt {}/{}",
                             challenge_attempt + 1,
+                            LOGIN_CAPTCHA_ATTEMPT_LIMIT,
                         )
                         try:
                             await self._await_login_outcome(point_url, agent, timeout_seconds=8)
