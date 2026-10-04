@@ -153,7 +153,7 @@ For SiliconFlow vision models, select the `glm` OpenAI-compatible adapter:
 | Variables | `LLM_PROVIDER` | `glm` |
 | Secrets | `GLM_API_KEY` | Your SiliconFlow API key |
 | Secrets | `GLM_BASE_URL` | `https://api.siliconflow.cn/v1` |
-| Variables | `GLM_MODEL` | `Qwen/Qwen3.5-122B-A10B` |
+| Variables | `GLM_MODEL` | `Qwen/Qwen3-VL-32B-Instruct` |
 
 You may also select another vision model currently offered by the platform, such as `Qwen/Qwen3-VL-30B-A3B-Thinking`. These are configuration examples, not guarantees of model availability or captcha accuracy. Check the four model overrides in both Secrets and Variables and remove stale values so they follow `GLM_MODEL`. The workflow reads `GLM_BASE_URL` from Secrets only.
 
@@ -161,9 +161,15 @@ When the endpoint explicitly rejects JSON Mode with HTTP 400 and `code=20024` or
 
 **Request budgets and diagnostics:** In Actions, `GLM_REQUEST_TIMEOUT_SECONDS`, `EXECUTION_TIMEOUT` and `RESPONSE_TIMEOUT` default to **90 / 240 / 30 seconds**. Variables take precedence over same-named Secrets. Local `.env` defaults remain **50 / 120 / 30 seconds**. The `glm` adapter requires `EXECUTION_TIMEOUT >= 2 * GLM_REQUEST_TIMEOUT_SECONDS + 3`; this only provides a minimum budget for two HTTP waits and a retry delay, not a guarantee that browser work and every captcha round will finish. Shorter MFA and checkout deadlines still apply.
 
-`GLM_ENABLE_THINKING`, `GLM_THINKING_BUDGET` and `GLM_MAX_TOKENS` default to empty and are omitted from requests. They also read Variables before Secrets. For SiliconFlow Qwen models that support these parameters, **`true` / `1024` / `2048`** are suggested starting values; check the selected provider and model first. SiliconFlow's `max_tokens` excludes thinking tokens and does not replace `thinking_budget`. Budget changes do not replace `GLM_MODEL`, so the example can continue using `Qwen/Qwen3.5-122B-A10B`.
+`GLM_ENABLE_THINKING`, `GLM_THINKING_BUDGET` and `GLM_MAX_TOKENS` default to empty and are omitted from requests. They also read Variables before Secrets. For SiliconFlow Qwen models that support these parameters, **`true` / `1024` / `2048`** are suggested starting values; check the selected provider and model first. SiliconFlow's `max_tokens` excludes thinking tokens and does not replace `thinking_budget`. Budget changes do not replace `GLM_MODEL`; configure these options only when supported by the selected model.
 
 New response diagnostics record metadata such as `elapsed_seconds`, `finish_reason`, input/output/reasoning token counts and `content_chars`, without printing answer or reasoning text. Blank, truncated, refused or schema-invalid responses are not treated as success and retain bounded retries under the existing attempt counts and deadlines. To roll back these settings, set the three timeouts to **50 / 120 / 30** and clear all three optional parameters from both Variables and Secrets. See [workflow request budgets](.github/workflows/README.en.md#request-budgets-and-diagnostics) for ranges and details. These settings do not establish successful live claims.
+
+**Qwen3-VL spatial coordinates:** Following the [official coordinate protocol](https://github.com/QwenLM/Qwen3-VL/blob/main/cookbooks/2d_grounding.ipynb), point selection and model-assisted dragging send only the original challenge screenshot. The model returns coordinates normalized to `0..1000` over that entire image; these are mapped to its captured page rectangle before validation. Historical coordinates are not guessed or clamped. Exact duplicate click points are removed in order, page/clickable-area guards remain, and answers are rejected if the rectangle changes during capture or before an action.
+
+The protocol is selected separately from `SPATIAL_POINT_REASONER_MODEL` and `SPATIAL_PATH_REASONER_MODEL`, matching only `Qwen3-VL-*`. Other models retain their grid protocol, and deterministic local drag solvers retain their page coordinates. The `*_coordinate_frame.json` runtime artifact records the source image, coordinate space and page rectangle alongside the unmodified model response. Correct mapping does not guarantee correct visual recognition or successful claims.
+
+For the `Qwen3-VL-32B-Instruct` example above, leave `GLM_ENABLE_THINKING` and `GLM_THINKING_BUDGET` unset; `GLM_MAX_TOKENS` may be set to `2048`. The thinking-budget examples apply only to models/endpoints that support those controls.
 
 If you use the `official Gemini API`, use this set:
 
