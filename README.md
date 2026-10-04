@@ -160,11 +160,17 @@ WXPush 与 Telegram 相互独立、可同时启用。受微信模板消息限制
 | Variables | `LLM_PROVIDER` | `glm` |
 | Secrets | `GLM_API_KEY` | 你的硅基流动 API Key |
 | Secrets | `GLM_BASE_URL` | `https://api.siliconflow.cn/v1` |
-| Variables | `GLM_MODEL` | `zai-org/GLM-4.5V` |
+| Variables | `GLM_MODEL` | `Qwen/Qwen3.5-122B-A10B` |
 
 也可将模型名设为平台当前提供的其他视觉模型，例如 `Qwen/Qwen3-VL-30B-A3B-Thinking`。这只是接口配置示例，不保证模型可用性或验证码通过率。检查 Secrets 和 Variables 两处的四个模型覆盖项；移除旧值后，它们才会统一跟随 `GLM_MODEL`。当前工作流只从 Secrets 读取 `GLM_BASE_URL`。
 
 接口明确返回 HTTP 400、`code=20024` 或 `Json mode is not supported` 时，适配器自动移除 `response_format`，只补发一次请求；JSON 输出提示、响应解析和校验仍保留。同一客户端随后调用该模型时，不再发送 JSON Mode 参数，无需新增环境变量。其他 400 错误（例如 `20015 / messages ... 151652 is not in list`）不会触发该降级，也不能据此宣称已修复。确定性的请求或鉴权错误会在关闭浏览器后终止本轮任务；多账号运行也会停止后续账号，避免重复请求。408、429、5xx 和网络超时仍走原有重试策略。
+
+**请求预算与诊断：** Actions 中 `GLM_REQUEST_TIMEOUT_SECONDS`、`EXECUTION_TIMEOUT`、`RESPONSE_TIMEOUT` 默认分别为 **90 / 240 / 30 秒**，优先读取 Variables，再读取同名 Secrets。本地 `.env` 的默认值仍为 **50 / 120 / 30 秒**。`glm` 分支要求 `EXECUTION_TIMEOUT >= 2 * GLM_REQUEST_TIMEOUT_SECONDS + 3`，这只是两次 HTTP 等待及重试间隔的最低预算，不能保证浏览器操作和所有验证码轮次都能完成。MFA 和 checkout 的较短截止时间仍然有效。
+
+`GLM_ENABLE_THINKING`、`GLM_THINKING_BUDGET`、`GLM_MAX_TOKENS` 默认留空，不发送给供应商；也支持 Variables 优先、Secrets 后备。支持这些参数的硅基 Qwen 模型可从 **`true` / `1024` / `2048`** 开始调整，先核对供应商和所选模型的参数支持。硅基流动的 `max_tokens` 不包含 thinking tokens，不能替代 `thinking_budget`。调整预算不会替换 `GLM_MODEL`，例如可继续使用上面的 `Qwen/Qwen3.5-122B-A10B`。
+
+新增响应诊断记录 `elapsed_seconds`、`finish_reason`、输入/输出/思考 token 数和 `content_chars` 等元数据，不打印答案或思考正文。空白答案、截断、拒答或不符合 schema 的结果不会被当作成功，仍按现有次数和截止时间有界重试。回滚参数时，将三个超时设为 **50 / 120 / 30**，并从 Variables 和 Secrets 两处清空三个可选参数。完整范围及说明见 [工作流请求预算](.github/workflows/README.md#请求预算与诊断)；这些设置不代表已经通过真实领取验证。
 
 如果你使用 `Gemini 官方接口`，请按下面这组填写：
 

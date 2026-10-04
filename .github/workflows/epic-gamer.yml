@@ -78,6 +78,10 @@ jobs:
           GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
           GLM_BASE_URL: ${{ secrets.GLM_BASE_URL }}
           GLM_MODEL: ${{ vars.GLM_MODEL || secrets.GLM_MODEL }}
+          GLM_REQUEST_TIMEOUT_SECONDS: ${{ vars.GLM_REQUEST_TIMEOUT_SECONDS || secrets.GLM_REQUEST_TIMEOUT_SECONDS || '90' }}
+          GLM_ENABLE_THINKING: ${{ vars.GLM_ENABLE_THINKING || secrets.GLM_ENABLE_THINKING }}
+          GLM_THINKING_BUDGET: ${{ vars.GLM_THINKING_BUDGET || secrets.GLM_THINKING_BUDGET }}
+          GLM_MAX_TOKENS: ${{ vars.GLM_MAX_TOKENS || secrets.GLM_MAX_TOKENS }}
           CHALLENGE_CLASSIFIER_MODEL: ${{ vars.CHALLENGE_CLASSIFIER_MODEL || secrets.CHALLENGE_CLASSIFIER_MODEL }}
           IMAGE_CLASSIFIER_MODEL: ${{ vars.IMAGE_CLASSIFIER_MODEL || secrets.IMAGE_CLASSIFIER_MODEL }}
           SPATIAL_POINT_REASONER_MODEL: ${{ vars.SPATIAL_POINT_REASONER_MODEL || secrets.SPATIAL_POINT_REASONER_MODEL }}
@@ -87,6 +91,8 @@ jobs:
           BROWSER_PROXY: ${{ secrets.BROWSER_PROXY }}
           HEADLESS: virtual
           DISABLE_BEZIER_TRAJECTORY: false
+          EXECUTION_TIMEOUT: ${{ vars.EXECUTION_TIMEOUT || secrets.EXECUTION_TIMEOUT || '240' }}
+          RESPONSE_TIMEOUT: ${{ vars.RESPONSE_TIMEOUT || secrets.RESPONSE_TIMEOUT || '30' }}
           # 在 Actions 中我们依靠 GitHub 的 cron 触发，所以关闭内部调度器
           ENABLE_APSCHEDULER: false
           MPLBACKEND: Agg

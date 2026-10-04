@@ -1445,3 +1445,25 @@
 - 改动文件：`.github/workflows/epic-gamer.yml`、`docs/maintenance-log.md`。
 - 处理结果：Actions 的 `BROWSER_BACKEND` 从 `auto` 改为 `playwright`，直接使用工作流已安装的 Playwright Firefox。模型路由、凭据、登录及领取逻辑不变；不调整本地或 Docker 的默认后端，也不扩大自动降级的异常范围。
 - 验证：核对安装步骤、环境变量与后端选择路径，完成 YAML 语法及差异检查。按 AGENTS.md 未执行测试、浏览器登录、模型请求或领取；仍需合并后运行验证，不能据此保证完整领取成功。
+
+### 2026-10-05 接入模型请求预算并诊断不可用的结构化响应
+
+- 现象：运行 #49（37209439862）已成功启动 Playwright Firefox，但模型请求多次在 50 秒读等待后超时；一次点选结果解析成功，后续响应缺少必要字段，最终登录失败。
+- 根因判断：Actions 未传入请求、验证码处理和验答超时，实际仍为 50/120/30 秒；两次读等待及重试间隔接近处理预算，多轮题目进一步消耗时间。当前错误信息也未记录结束原因和 token 用量，无法区分截断、空答案、模型耗时与排队/网络因素。不能仅凭模型参数量认定超时原因。
+- 改动文件：
+  - `app/settings.py`、`app/extensions/llm_adapter.py`、`app/extensions/llm_errors.py`
+  - `.github/workflows/epic-gamer.yml`、`.env.example`
+  - `tests/test_llm_budgets_and_diagnostics.py`
+  - `README.md`、`README.en.md`、`.github/workflows/README.md`、`.github/workflows/README.en.md`、`docs/maintenance-log.md`
+- 处理结果：
+  - Actions 显式映射三个超时，未配置时为 90/240/30 秒；本地默认50/120/30秒保留。拒绝非有限值和非法范围，GLM 分支检查 `EXECUTION_TIMEOUT >= 2 * GLM_REQUEST_TIMEOUT_SECONDS + 3`，只作为最低等待预算，不放宽 MFA/checkout 的剩余截止时间。
+  - 接入可选 `GLM_ENABLE_THINKING`、`GLM_THINKING_BUDGET`、`GLM_MAX_TOKENS`，空值不发送，显式 false 保留。模型不自动替换；对支持这些参数的硅基 Qwen 可从 true/1024/2048 开始受控验证，尚未证明该模型严格执行推理上限。
+  - 新增耗时、结束原因、输入/输出/思考 token 数和内容长度诊断；不输出响应正文或思考内容。截断、拒答、空白及 schema 校验失败显式转为响应错误，保留已有的有限重试、JSON Mode 降级及不可恢复请求终止路径，不制造默认验证码答案。
+  - 回归用例覆盖可选参数、旧响应兼容、不可用响应拒绝、诊断脱敏及真实 Settings 校验。按仓库禁止执行测试的规定，本阶段未运行测试或实际模型/领取请求；仅完成静态验证，真实效果仍待后续授权验证。
+
+
+### 2026-10-05 请求预算修复的授权验证更新
+
+- 用户明确授权本轮测试、合并与启动，覆盖本次验证所需的测试执行限制；未修改仓库 AGENTS.md。
+- 在 Python 3.12.13、锁定依赖环境下执行 `uv run --no-sync pytest -q tests/test_glm_adapter.py tests/test_glm_json_compatibility.py tests/test_llm_errors.py tests/test_llm_budgets_and_diagnostics.py`，结果为 **92 passed in 14.71s**。
+- 覆盖 JSON Mode 降级、不可恢复错误穿透、取消与清理、预算映射和校验、响应拒绝/解析及诊断脱敏。此结果是离线回归证据，真实模型请求和完整领取结果仍待新运行确认。

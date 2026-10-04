@@ -17,9 +17,9 @@ The workflow runs the following steps on a GitHub-hosted runner:
 2. Install `uv` and Python 3.12.
 3. Install system dependencies.
 4. Run `uv sync` to install Python dependencies.
-5. Download Camoufox browser assets.
-6. Install Playwright Firefox as a browser fallback.
-7. Run `uv run app/deploy.py` inside `xvfb`.
+5. Attempt to download Camoufox browser assets; this step may fail without stopping the workflow.
+6. Install Playwright Firefox, the browser backend explicitly selected for Actions.
+7. Run `uv run app/deploy.py` inside `xvfb` with `BROWSER_BACKEND=playwright` and `HEADLESS=virtual`.
 
 The workflow is triggered by GitHub `schedule` and `workflow_dispatch`. APScheduler inside the repository is disabled in this mode to avoid duplicate scheduling.
 
@@ -117,6 +117,27 @@ The program also checks these per-task overrides first. If they are not set, the
 
 Store these non-sensitive values as GitHub Variables. Existing forks can continue using same-named Secrets through the workflow fallback.
 
+## Request Budgets and Diagnostics
+
+The following settings read Actions Variables before same-named Secrets, then use the defaults below. Local `.env` defaults remain separate.
+
+| Setting | Actions default | Local default | Range or purpose |
+| --- | --- | --- | --- |
+| `GLM_REQUEST_TIMEOUT_SECONDS` | `90` | `50` | Finite number, `>5` and `<=120` seconds; HTTP wait timeout, with connection waits capped at 30 seconds |
+| `EXECUTION_TIMEOUT` | `240` | `120` | Finite positive number; captcha-solving budget in seconds |
+| `RESPONSE_TIMEOUT` | `30` | `30` | Finite positive number; captcha-verification response budget in seconds |
+| `GLM_ENABLE_THINKING` | Empty | Empty | Optional `true` / `false`; omitted when empty |
+| `GLM_THINKING_BUDGET` | Empty | Empty | Optional integer `128..32768`; omitted when empty |
+| `GLM_MAX_TOKENS` | Empty | Empty | Optional positive integer; omitted when empty |
+
+With `LLM_PROVIDER=glm`, `EXECUTION_TIMEOUT` must be at least `2 * GLM_REQUEST_TIMEOUT_SECONDS + 3`; a lower value raises a configuration error. This is a minimum for two HTTP waits and a three-second retry delay. HTTPX phase timeouts are not total request deadlines, and browser work, multiple rounds and compatibility fallbacks also consume time. The ordinary login/cart outer budget becomes `240 + 30 + 5 = 275` seconds; shorter remaining MFA, checkout and probe deadlines still apply. Accounts remain sequential, and `JOB_TIMEOUT_MINUTES` still controls the overall workflow limit, which defaults to 60 minutes.
+
+For example, keep `GLM_MODEL=Qwen/Qwen3.5-122B-A10B` on SiliconFlow and, after checking model support, set the three optional parameters to `true`, `1024` and `2048`. SiliconFlow's `max_tokens` excludes thinking tokens, so configure output and reasoning budgets separately. Check other providers' supported parameters and semantics individually. Budget settings do not replace the model or demonstrate a successful live claim.
+
+New response diagnostics record only metadata such as `elapsed_seconds`, `finish_reason`, input/output/reasoning token counts and `content_chars`, without printing answer or reasoning text. Blank, truncated, refused and schema-invalid results raise explicit errors and retain bounded retries under existing attempt counts and deadlines. HTTP 200 or the presence of reasoning alone does not establish a valid answer. A timeout alone also cannot distinguish networking, server queues and inference latency.
+
+To roll back these settings, set the three timeout Variables to `50`, `120` and `30`, and remove all three optional parameters from both Variables and Secrets. For a local `.env`, use the same timeouts and leave optional parameters empty. This does not require changing the model, account or browser configuration.
+
 ## Local One-Shot Debugging
 
 To reproduce the same entrypoint locally, use the same runtime path as the workflow:
@@ -153,7 +174,7 @@ After forking, open the `Actions` page in your fork, enter `Epic Awesome Gamer (
 > [!IMPORTANT]
 > Do not cancel the workflow just because it is still retrying after around 5 minutes. Login captcha and checkout verification can fail repeatedly, retry many times, and even hit timeouts before finally passing. Some successful runs still take 15 to 20 minutes.
 
-If `Camoufox` fails to download or bootstrap on a specific runner, the workflow now continues with an installed Playwright Firefox fallback instead of failing immediately during browser setup.
+Actions explicitly uses the installed Playwright Firefox and skips Camoufox startup. `HEADLESS=virtual` uses the display supplied by `xvfb-run`. Local and Docker defaults remain `auto`; their automatic fallback conditions have not been broadened.
 
 ## Keeping Your Fork Updated
 
@@ -200,7 +221,7 @@ Example log for a 429 rate-limit case:
 
 ### 4. hCaptcha repeatedly logs GLM timeouts or HSW decoding failures
 
-Sync the latest `master` from the upstream repository first. The current version reports a single GLM timeout as `GLM request timed out after ...` and limits network attempts so retries cannot consume the entire challenge budget. It also requests `hsw.js` without compression to avoid `NS_ERROR_INVALID_CONTENT_ENCODING` in Camoufox/Firefox.
+Sync the latest `master` first, then compare the active settings with the request budgets and diagnostics above. GLM timeout logs include elapsed time, the timeout phase and the configured limit. Retries are bounded by attempt counts and the outer captcha deadline, but can still exhaust that budget. The browser requests `hsw.js` without compression to avoid `NS_ERROR_INVALID_CONTENT_ENCODING`.
 
 These safeguards do not bypass Epic or hCaptcha risk controls. If difficult challenges continue after syncing, verify GLM API stability and consider configuring `BROWSER_PROXY`; GitHub-hosted runners still use shared outbound IPs that may increase challenge difficulty. Do not disable `glm-4.6v` thinking just to reduce latency: replaying this failure sample showed materially worse point-selection accuracy with thinking disabled.
 

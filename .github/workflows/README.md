@@ -17,9 +17,9 @@
 2. 安装 `uv` 和 Python 3.12。
 3. 安装系统依赖。
 4. 执行 `uv sync` 安装 Python 依赖。
-5. 下载 Camoufox 浏览器资源。
-6. 安装 Playwright Firefox 作为浏览器回退方案。
-7. 在 `xvfb` 环境中运行 `uv run app/deploy.py`。
+5. 尝试下载 Camoufox 浏览器资源，该步骤允许失败。
+6. 安装 Playwright Firefox，作为 Actions 显式选择的浏览器后端。
+7. 在 `xvfb` 环境中，以 `BROWSER_BACKEND=playwright`、`HEADLESS=virtual` 运行 `uv run app/deploy.py`。
 
 它默认由 GitHub 的 `schedule` 和 `workflow_dispatch` 触发，仓库内的 APScheduler 会被关闭，避免重复调度。
 
@@ -117,6 +117,27 @@ WXPush 与 Telegram 相互独立、可同时启用；任一渠道发送失败都
 
 这些非敏感配置建议作为 GitHub Variables 配置。为兼容已有 Fork，工作流仍会回退读取同名 Secrets。
 
+## 请求预算与诊断
+
+以下设置均优先读取 Actions Variables，再读取同名 Secrets；未设置时使用表中默认值。本地 `.env` 默认值单独保留。
+
+| 配置 | Actions 默认 | 本地默认 | 范围或用途 |
+| --- | --- | --- | --- |
+| `GLM_REQUEST_TIMEOUT_SECONDS` | `90` | `50` | 有限数，`>5` 且 `<=120` 秒；HTTP 等待超时，连接阶段最多 30 秒 |
+| `EXECUTION_TIMEOUT` | `240` | `120` | 有限正数；验证码处理预算，单位秒 |
+| `RESPONSE_TIMEOUT` | `30` | `30` | 有限正数；等待验证码验证结果的预算，单位秒 |
+| `GLM_ENABLE_THINKING` | 留空 | 留空 | 可选 `true` / `false`，不填则不发送 |
+| `GLM_THINKING_BUDGET` | 留空 | 留空 | 可选整数 `128..32768`，不填则不发送 |
+| `GLM_MAX_TOKENS` | 留空 | 留空 | 可选正整数，不填则不发送 |
+
+`LLM_PROVIDER=glm` 时，`EXECUTION_TIMEOUT` 必须至少为 `2 * GLM_REQUEST_TIMEOUT_SECONDS + 3`，不满足会报配置错误。该下限按两次 HTTP 等待和 3 秒重试间隔计算；HTTPX 的阶段超时不是整个请求的总时限，浏览器操作、多轮题目及兼容降级也要耗时。普通登录/购物车调用的外层预算随配置变为 `240 + 30 + 5 = 275` 秒；MFA、checkout 和探测流程中更短的剩余截止时间不会被扩大。多账号仍顺序执行，工作流总时限仍由 `JOB_TIMEOUT_MINUTES` 控制，默认 60 分钟。
+
+例如在硅基流动保留 `GLM_MODEL=Qwen/Qwen3.5-122B-A10B`，确认该模型支持后，可将三个可选参数分别设为 `true`、`1024`、`2048`。硅基流动的 `max_tokens` 不包含 thinking tokens，应分别配置输出与思考预算；其他供应商的支持范围和语义需单独核对。预算配置不会更换模型，也不代表已验证完整领取成功。
+
+新增响应诊断只记录 `elapsed_seconds`、`finish_reason`、输入/输出/思考 token 数、`content_chars` 等元数据，不打印答案或思考正文。空白、截断、拒答和 schema 校验失败会明确报错，并按既有次数与截止时间有界重试，不能把 HTTP 200 或存在思考内容当作答题成功。超时本身也不能区分网络、服务端排队和推理耗时。
+
+回滚这些参数：在 Variables 中将三个超时分别设为 `50`、`120`、`30`，并从 Variables 和 Secrets 两处删除三个可选参数；本地 `.env` 使用相同超时值并将可选参数留空。模型、账号及浏览器配置无需随之调整。
+
 ## 本地单次调试
 
 如果你要在本地复现 GitHub Actions 的执行入口，推荐直接沿用同一个启动路径：
@@ -152,7 +173,7 @@ Fork 之后先打开自己仓库的 `Actions` 页面，进入 `Epic Awesome Game
 > [!IMPORTANT]
 > 不要看到工作流运行了 5 分钟左右还在重试就手动取消。登录验证码和 checkout 二次校验可能会连续失败、反复重试，甚至中途出现 timeout；这属于正常现象，有些最终成功的案例会持续 15 到 20 分钟。
 
-如果某次 runner 上 `Camoufox` 下载失败或启动失败，新的工作流会继续依赖已安装的 Playwright Firefox 回退运行，而不是直接在浏览器准备阶段终止。
+Actions 当前显式使用已安装的 Playwright Firefox，跳过 Camoufox 启动；`HEADLESS=virtual` 使用 `xvfb-run` 提供的显示环境。本地和 Docker 的默认后端仍为 `auto`，其自动降级条件没有因此扩大。
 
 ## Fork 后如何和主仓库同步
 
@@ -192,7 +213,7 @@ GitHub 的共享出口 IP 可能被 Epic 风控。通常换个时间重新执行
 
 ### 4. hCaptcha 日志反复出现 GLM 超时或 HSW 解码失败
 
-先同步主仓库的最新 `master`。当前版本会把 GLM 单次请求超时明确记录为 `GLM request timed out after ...`，并限制单轮网络尝试次数，避免模型重试耗尽整个验证码时限；浏览器也会自动对 `hsw.js` 使用无压缩传输，规避 `NS_ERROR_INVALID_CONTENT_ENCODING`。
+先同步主仓库的最新 `master`，再对照上面的请求预算与诊断检查实际配置。GLM 超时日志包含经过时间、超时阶段和配置值；重试受次数及外层验证码时限约束，但仍可能耗尽预算。浏览器对 `hsw.js` 使用无压缩传输，以规避 `NS_ERROR_INVALID_CONTENT_ENCODING`。
 
 这些处理不会绕过 Epic/hCaptcha 的风控。若同步后仍持续收到更难的挑战，优先检查 GLM API 是否稳定，并考虑配置 `BROWSER_PROXY`；GitHub Hosted Runner 的共享出口 IP 仍可能提高挑战难度。不要通过关闭 `glm-4.6v` thinking 来单纯换取速度，本项目的失败样本重放中，这会显著降低点选准确率。
 
