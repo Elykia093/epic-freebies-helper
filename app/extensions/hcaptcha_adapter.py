@@ -739,6 +739,33 @@ def _build_drag_prompt(user_prompt: str, *, source_points: list[tuple[int, int]]
     return f"{user_prompt}\n\n{details}"
 
 
+def _build_normalized_spatial_prompt(
+    user_prompt: str,
+    *,
+    captcha_payload: Any,
+    source_points: list[tuple[int, int]] | None = None,
+) -> str:
+    question = None
+    with suppress(Exception):
+        question = captcha_payload.get_requester_question()
+    parts = []
+    if isinstance(question, str) and question.strip() and question.strip() not in user_prompt:
+        parts.append(f"Task instruction: {question.strip()}")
+    parts.append(user_prompt)
+    if source_points is not None:
+        if source_points:
+            parts.append(
+                f"Available draggable candidates in the payload: {len(source_points)}. "
+                "This describes the available candidates, not a required number of moves."
+            )
+        parts.append(
+            "Identify which objects the task requires moving and match each to its destination. "
+            "Return a separate path for each required move; do not combine separate moves into "
+            "one path or omit a required move."
+        )
+    return "\n\n".join(parts)
+
+
 def _cancel_pending_empty_response(agent: Any) -> None:
     pending = getattr(agent, "_epic_empty_response_task", None)
     if pending is not None and not pending.done():
@@ -842,6 +869,10 @@ def apply_hcaptcha_drag_patch() -> None:
                         clickable_bounds=clickable_bounds,
                     )
                 )
+                if normalized:
+                    user_prompt = _build_normalized_spatial_prompt(
+                        user_prompt, captcha_payload=self.captcha_payload
+                    )
                 response = await _request_spatial_response(
                     self._spatial_point_reasoner,
                     raw,
@@ -940,7 +971,11 @@ def apply_hcaptcha_drag_patch() -> None:
                     raw,
                     projection,
                     (
-                        user_prompt
+                        _build_normalized_spatial_prompt(
+                            user_prompt,
+                            captcha_payload=self.captcha_payload,
+                            source_points=source_points,
+                        )
                         if normalized
                         else _build_drag_prompt(user_prompt, source_points=source_points)
                     ),

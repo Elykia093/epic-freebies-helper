@@ -73,6 +73,16 @@ def _images(tmp_path):
     return raw, projection
 
 
+def _user_prompt(request):
+    return "\n".join(
+        item["text"]
+        for message in request["messages"]
+        if message["role"] == "user"
+        for item in message["content"]
+        if item["type"] == "text"
+    )
+
+
 def test_qwen_single_image_instruction_survives_real_google_config(tmp_path):
     raw, projection = _images(tmp_path)
     reasoner, uploads, requests = _offline_reasoner(_answer([(500, 500)]))
@@ -240,6 +250,25 @@ def test_non_qwen_point_flow_keeps_page_coordinates(point_flow):
     assert metadata["space"] == "page"
 
 
+def test_qwen_point_request_restores_task_instruction_without_drag_planning(point_flow):
+    flow = point_flow([(500, 500)])
+    question = "Select all circles that match the reference color."
+    flow.arm._match_user_prompt = lambda _job: "JobType.IMAGE_LABEL_AREA_SELECT"
+    flow.arm.captcha_payload = SimpleNamespace(get_requester_question=lambda: question)
+
+    flow.run()
+
+    request = flow.requests[0]
+    prompt = _user_prompt(request)
+    assert prompt.count(question) == 1
+    assert "JobType.IMAGE_LABEL_AREA_SELECT" in prompt
+    assert "Available draggable candidates" not in prompt
+    assert "Return a separate path" not in prompt
+    assert flow.uploads == [flow.raw]
+    assert request["config"].system_instruction == NORMALIZED_SPATIAL_INSTRUCTION
+    assert "gray coordinate grid" not in json.dumps(request["messages"])
+
+
 @pytest.mark.parametrize("point", [(1000, 500), (500, 1000), (999, 500), (500, 999)])
 def test_normalized_points_on_or_rounded_to_css_edges_are_not_clicked(point_flow, point):
     flow = point_flow([point])
@@ -362,6 +391,103 @@ def test_qwen_drag_maps_both_endpoints_before_source_correction_and_execution(dr
     cached = json.loads((flow.cache_key / "capture_0_model_answer.json").read_text("utf-8"))
     assert cached["parsed"]["paths"] == [path.model_dump() for path in flow.answer.paths]
     flow.arm.click_by_mouse.assert_awaited_once()
+
+
+def test_qwen_drag_request_adds_task_and_candidates_without_forcing_path_count(
+    drag_flow, monkeypatch
+):
+    coordinates = [((100, 200), (700, 800))]
+    flow = drag_flow(coordinates)
+    question = "Put the correct animal into its matching outline."
+    flow.arm._match_user_prompt = lambda _job: "JobType.IMAGE_DRAG_DROP"
+    flow.arm.captcha_payload = SimpleNamespace(
+        get_requester_question=lambda: question,
+        tasklist=[
+            SimpleNamespace(
+                entities=[
+                    SimpleNamespace(coords=[59, 55], size=[85, 85]),
+                    SimpleNamespace(coords=[59, 154], size=[85, 85]),
+                ]
+            )
+        ],
+    )
+    monkeypatch.setattr(adapter, "_detect_task_canvas_origin", lambda _path: (0, 0))
+
+    flow.run()
+
+    request = flow.requests[0]
+    prompt = _user_prompt(request)
+    assert prompt.count(question) == 1
+    assert "JobType.IMAGE_DRAG_DROP" in prompt
+    assert "Available draggable candidates in the payload: 2" in prompt
+    assert "not a required number of moves" in prompt
+    assert "Return a separate path for each required move" in prompt
+    assert "Authoritative draggable centers" not in prompt
+    assert "1259" not in prompt
+    assert "(59, 55)" not in prompt
+    assert flow.uploads == [flow.raw]
+    assert request["config"].system_instruction == NORMALIZED_SPATIAL_INSTRUCTION
+    assert "gray coordinate grid" not in json.dumps(request["messages"])
+    flow.arm._perform_drag_drop.assert_awaited_once()
+    assert _path_pairs([flow.arm._perform_drag_drop.await_args.args[0]]) == [
+        ((1250, 880), (1550, 1120))
+    ]
+    assert _path_pairs(flow.answer.paths) == coordinates
+    cached = json.loads((flow.cache_key / "capture_0_model_answer.json").read_text("utf-8"))
+    assert len(cached["parsed"]["paths"]) == 1
+
+
+@pytest.mark.parametrize(
+    "entities",
+    [[], [SimpleNamespace(coords=["invalid", 55], size=[85, 85])]],
+    ids=["empty", "invalid-coordinates"],
+)
+def test_qwen_drag_request_does_not_claim_zero_candidates_when_sources_are_unknown(
+    drag_flow, entities
+):
+    flow = drag_flow([((100, 200), (700, 800))])
+    question = "Move each required object to its destination."
+    flow.arm._match_user_prompt = lambda _job: "JobType.IMAGE_DRAG_DROP"
+    flow.arm.captcha_payload = SimpleNamespace(
+        get_requester_question=lambda: question, tasklist=[SimpleNamespace(entities=entities)]
+    )
+
+    flow.run()
+
+    prompt = _user_prompt(flow.requests[0])
+    assert question in prompt
+    assert "Available draggable candidates" not in prompt
+    assert "Return a separate path for each required move" in prompt
+    flow.arm._perform_drag_drop.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        SimpleNamespace(),
+        SimpleNamespace(get_requester_question=Mock(side_effect=ValueError("unavailable"))),
+        SimpleNamespace(get_requester_question=lambda: None),
+        SimpleNamespace(get_requester_question=lambda: {"question": "not a string"}),
+        SimpleNamespace(get_requester_question=lambda: " \n\t "),
+    ],
+    ids=["no-payload", "missing-method", "exception", "none", "non-string", "blank"],
+)
+def test_normalized_prompt_keeps_existing_context_when_payload_question_is_unusable(payload):
+    prompt = "JobType.IMAGE_LABEL_AREA_SELECT"
+
+    assert adapter._build_normalized_spatial_prompt(prompt, captcha_payload=payload) == prompt
+
+
+def test_normalized_prompt_does_not_duplicate_an_existing_task_instruction():
+    question = "Select all matching circles."
+    prompt = f"{question}\n\nJobType.IMAGE_LABEL_AREA_SELECT"
+    payload = SimpleNamespace(get_requester_question=lambda: f"  {question}\n")
+
+    result = adapter._build_normalized_spatial_prompt(prompt, captcha_payload=payload)
+
+    assert result == prompt
+    assert result.count(question) == 1
 
 
 @pytest.mark.parametrize(
