@@ -160,7 +160,7 @@ WXPush 与 Telegram 相互独立、可同时启用。受微信模板消息限制
 | Variables | `LLM_PROVIDER` | `glm` |
 | Secrets | `GLM_API_KEY` | 你的硅基流动 API Key |
 | Secrets | `GLM_BASE_URL` | `https://api.siliconflow.cn/v1` |
-| Variables | `GLM_MODEL` | `Qwen/Qwen3.5-122B-A10B` |
+| Variables | `GLM_MODEL` | `Qwen/Qwen3-VL-32B-Instruct` |
 
 也可将模型名设为平台当前提供的其他视觉模型，例如 `Qwen/Qwen3-VL-30B-A3B-Thinking`。这只是接口配置示例，不保证模型可用性或验证码通过率。检查 Secrets 和 Variables 两处的四个模型覆盖项；移除旧值后，它们才会统一跟随 `GLM_MODEL`。当前工作流只从 Secrets 读取 `GLM_BASE_URL`。
 
@@ -168,9 +168,15 @@ WXPush 与 Telegram 相互独立、可同时启用。受微信模板消息限制
 
 **请求预算与诊断：** Actions 中 `GLM_REQUEST_TIMEOUT_SECONDS`、`EXECUTION_TIMEOUT`、`RESPONSE_TIMEOUT` 默认分别为 **90 / 240 / 30 秒**，优先读取 Variables，再读取同名 Secrets。本地 `.env` 的默认值仍为 **50 / 120 / 30 秒**。`glm` 分支要求 `EXECUTION_TIMEOUT >= 2 * GLM_REQUEST_TIMEOUT_SECONDS + 3`，这只是两次 HTTP 等待及重试间隔的最低预算，不能保证浏览器操作和所有验证码轮次都能完成。MFA 和 checkout 的较短截止时间仍然有效。
 
-`GLM_ENABLE_THINKING`、`GLM_THINKING_BUDGET`、`GLM_MAX_TOKENS` 默认留空，不发送给供应商；也支持 Variables 优先、Secrets 后备。支持这些参数的硅基 Qwen 模型可从 **`true` / `1024` / `2048`** 开始调整，先核对供应商和所选模型的参数支持。硅基流动的 `max_tokens` 不包含 thinking tokens，不能替代 `thinking_budget`。调整预算不会替换 `GLM_MODEL`，例如可继续使用上面的 `Qwen/Qwen3.5-122B-A10B`。
+`GLM_ENABLE_THINKING`、`GLM_THINKING_BUDGET`、`GLM_MAX_TOKENS` 默认留空，不发送给供应商；也支持 Variables 优先、Secrets 后备。支持这些参数的硅基 Qwen 模型可从 **`true` / `1024` / `2048`** 开始调整，先核对供应商和所选模型的参数支持。硅基流动的 `max_tokens` 不包含 thinking tokens，不能替代 `thinking_budget`。调整预算不会替换 `GLM_MODEL`，请按所选模型的支持范围配置。
 
 新增响应诊断记录 `elapsed_seconds`、`finish_reason`、输入/输出/思考 token 数和 `content_chars` 等元数据，不打印答案或思考正文。空白答案、截断、拒答或不符合 schema 的结果不会被当作成功，仍按现有次数和截止时间有界重试。回滚参数时，将三个超时设为 **50 / 120 / 30**，并从 Variables 和 Secrets 两处清空三个可选参数。完整范围及说明见 [工作流请求预算](.github/workflows/README.md#请求预算与诊断)；这些设置不代表已经通过真实领取验证。
+
+**Qwen3-VL 空间坐标：** 根据 [Qwen 官方坐标协议](https://github.com/QwenLM/Qwen3-VL/blob/main/cookbooks/2d_grounding.ipynb)，点选和需要模型处理的拖拽只发送一张原始验证码截图，要求返回相对整张图的 `0..1000` 坐标，再按截图对应的页面矩形转换。这里不会把历史答案猜成另一种坐标，也不会把越界点截到边缘。点选精确保序去重，仍校验页面和可点击区域；截图期间或模型返回后矩形发生变化时，不执行旧答案。
+
+协议分别根据 `SPATIAL_POINT_REASONER_MODEL`、`SPATIAL_PATH_REASONER_MODEL` 判断，仅自动匹配 `Qwen3-VL-*`；其他模型保留原网格模式，本地确定性拖拽解法不变。运行产物中的 `*_coordinate_frame.json` 记录输入图、坐标空间和页面矩形，原始模型响应也会保留，便于区分识别错误与坐标错误。正确转换不保证模型一定识别正确，仍需以实际验证码及领取结果验收。
+
+上面的 `Qwen3-VL-32B-Instruct` 示例请保持 `GLM_ENABLE_THINKING`、`GLM_THINKING_BUDGET` 未设置；`GLM_MAX_TOKENS` 可设为 `2048`。推理预算示例仅适用于支持相应控制的模型和接口。
 
 如果你使用 `Gemini 官方接口`，请按下面这组填写：
 

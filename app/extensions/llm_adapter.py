@@ -15,6 +15,7 @@ from loguru import logger
 from pydantic import BaseModel, ValidationError
 
 from extensions.llm_errors import LLMRequestAbort, LLMResponseError
+from extensions.spatial_coordinates import NORMALIZED_SPATIAL_INSTRUCTION
 
 CHALLENGE_TYPE_VALUES = frozenset(member.value for member in ChallengeTypeEnum)
 REQUEST_TYPE_VALUES = frozenset(member.value for member in RequestType)
@@ -1185,7 +1186,7 @@ class _GLMAsyncModels:
                 continue
             messages.append({"role": role, "content": items})
 
-        if has_image:
+        if has_image and system_instruction != NORMALIZED_SPATIAL_INSTRUCTION:
             system_messages.append(GLM_VISUAL_COORDINATE_INSTRUCTION)
             response_fields = _schema_field_names(getattr(config, "response_schema", None))
             if "paths" in response_fields:

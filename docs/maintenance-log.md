@@ -1467,3 +1467,15 @@
 - 用户明确授权本轮测试、合并与启动，覆盖本次验证所需的测试执行限制；未修改仓库 AGENTS.md。
 - 在 Python 3.12.13、锁定依赖环境下执行 `uv run --no-sync pytest -q tests/test_glm_adapter.py tests/test_glm_json_compatibility.py tests/test_llm_errors.py tests/test_llm_budgets_and_diagnostics.py`，结果为 **92 passed in 14.71s**。
 - 覆盖 JSON Mode 降级、不可恢复错误穿透、取消与清理、预算映射和校验、响应拒绝/解析及诊断脱敏。此结果是离线回归证据，真实模型请求和完整领取结果仍待新运行确认。
+
+
+### 2026-10-05 统一 Qwen3-VL 空间坐标并防止重复或过期点击
+
+- 现象：运行 #50 的原始响应标记为 Qwen3-VL-32B-Instruct，包含越界坐标及同一点重复 2 次、10 次的列表；#51 已确认 90/240/30 秒预算和响应诊断生效，但仍有空点、越界及截断响应，登录未完成。
+- 根因判断：上游同时提供 500×471 原始裁剪图和 1000×1000 页面刻度网格，要求输出页面绝对坐标；Qwen3-VL 官方 grounding 协议则是相对输入图像的 0..1000 坐标。历史错误坐标不能据此直接反算。重复点已在模型原始 JSON 中出现，旧点击循环会逐项重复执行；旧校验也未覆盖模型等待后页面矩形变化。
+- 改动文件：`app/extensions/spatial_coordinates.py`、`app/extensions/hcaptcha_adapter.py`、`app/extensions/llm_adapter.py`、`tests/test_spatial_coordinates.py`、`tests/test_spatial_request_contract.py`、中英文 README 及本维护日志。
+- 处理结果：
+  - 按点选/路径的模型名识别 Qwen3-VL，仅提供一张完整原图和明确的归一化协议，不混入页面网格提示；按捕获时的真实 CSS 矩形确定性转换，原始响应缓存不改写。其他模型仍使用原来的网格协议，本地确定性拖拽保持页坐标。
+  - 保留并强化页面与任务区域验证：非有限、归一化越界、转换后越界均拒绝，CSS右/下边缘按半开区间处理，无 clamp。精确保序去重仅用于同一响应的点击点；不合并相近点、不改拖拽次数。
+  - 截图前后、模型返回后以及每次点击/拖拽前检查矩形，变化时不执行旧答案；保存坐标空间、原图名称与矩形元数据，并保留被拒绝的原始响应供排障。
+- 验证：用户已授权本轮离线测试。几何、真实 SDK 请求契约、假页面点选/拖拽集成和既有 LLM/hCaptcha 回归共 **170 passed in 2.61s**，覆盖单图/双图、映射顺序、去重、缓存隔离、边界变化、CSS边缘及本地拖拽。真实模型识别和领取效果仍待新运行验证，不将离线通过等同于领取成功。
