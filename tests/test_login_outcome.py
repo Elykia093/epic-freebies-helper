@@ -3,7 +3,7 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from hcaptcha_challenger.models import ChallengeSignal
@@ -341,18 +341,169 @@ def test_mfa_submission_can_extend_short_wait_for_real_login_signal(
     assert clock.now == 105.0
 
 
-def test_repeated_mfa_challenges_cannot_extend_the_hard_deadline(
+def test_slow_mfa_challenges_hit_hard_deadline_before_call_budget(
     auth_module, login_state, monkeypatch
 ):
     auth, _page, clock = login_state(url=f"{LOGIN_URL}/mfa", frames=[_active_frame()])
-    solver = AsyncMock(return_value=ChallengeSignal.SUCCESS)
+    requested_timeouts = []
+
+    async def slow_success(_agent, *, timeout_seconds, **_kwargs):
+        requested_timeouts.append(timeout_seconds)
+        clock.now += min(100, timeout_seconds)
+        return ChallengeSignal.SUCCESS
+
+    solver = AsyncMock(side_effect=slow_success)
     monkeypatch.setattr(auth_module, "wait_for_challenge_signal", solver)
 
     with pytest.raises(auth_module.PlaywrightTimeoutError):
         asyncio.run(auth._await_login_outcome(LOGIN_URL, object(), timeout_seconds=4))
 
-    assert solver.await_count > 1
+    assert solver.await_count == 2
+    assert requested_timeouts[1] < requested_timeouts[0]
     assert clock.now <= 280.5
+
+
+@pytest.mark.parametrize("outcome", ["failure", "timeout", "exception"])
+def test_fast_unsuccessful_challenges_exhaust_three_calls_without_internal_retry_reset(
+    auth_module, login_state, monkeypatch, outcome
+):
+    auth, _page, clock = login_state(frames=[_active_frame()])
+    solver = AsyncMock(return_value=ChallengeSignal.FAILURE)
+    if outcome == "timeout":
+        solver.side_effect = auth_module.PlaywrightTimeoutError("offline solver timeout")
+    elif outcome == "exception":
+        solver.side_effect = ValueError("offline solver failure")
+    monkeypatch.setattr(auth_module, "wait_for_challenge_signal", solver)
+
+    with pytest.raises(auth_module.EpicCaptchaBudgetExceededError):
+        asyncio.run(auth._await_login_outcome(LOGIN_URL, object()))
+
+    assert solver.await_count == 3
+    assert auth._captcha_solve_attempts == 3
+    assert clock.now < 105.0
+    assert auth._is_login_success_signal.empty()
+
+
+def test_context_labels_do_not_reset_shared_captcha_budget(auth_module, login_state, monkeypatch):
+    auth, page, _clock = login_state()
+    solver = AsyncMock(return_value=ChallengeSignal.FAILURE)
+    monkeypatch.setattr(auth_module, "wait_for_challenge_signal", solver)
+
+    async def invoke_contexts():
+        for context in ("login:1", "login_mfa", "new_challenge_after_refresh"):
+            page.url = f"{LOGIN_URL}/mfa?step={context}"
+            await auth._wait_for_login_challenge(object(), context=context, timeout_seconds=10)
+        with pytest.raises(auth_module.EpicCaptchaBudgetExceededError):
+            await auth._wait_for_login_challenge(object(), context="login:2", timeout_seconds=10)
+
+    asyncio.run(invoke_contexts())
+
+    assert solver.await_count == 3
+    assert auth._captcha_solve_attempts == 3
+
+
+def _prepare_real_login_outcome(auth_module, auth, page, monkeypatch, signal):
+    outcome = auth._await_login_outcome
+    _prepare_login(auth_module, auth, page, monkeypatch, signal)
+    monkeypatch.setattr(auth, "_await_login_outcome", outcome)
+    monkeypatch.setattr(auth_module.time, "time", lambda: 1000, raising=False)
+    page.screenshot = AsyncMock()
+
+
+def test_initial_solver_and_outcome_solver_share_one_three_call_budget(
+    auth_module, login_state, monkeypatch
+):
+    auth, page, _clock = login_state(frames=[_active_frame()])
+    _prepare_real_login_outcome(auth_module, auth, page, monkeypatch, ChallengeSignal.FAILURE)
+
+    assert asyncio.run(auth._login()) is None
+
+    solver = auth_module.wait_for_challenge_signal
+    assert solver.await_count == 3
+    assert solver.await_args_list[0].kwargs["context"] == "login:1"
+    assert [call.kwargs["context"] for call in solver.await_args_list[1:]] == [
+        "login_mfa",
+        "login_mfa",
+    ]
+    assert auth._captcha_solve_attempts == 3
+    assert "requires two-factor" not in "\n".join(auth_module.test_messages)
+    auth._handle_right_account_validation.assert_not_awaited()
+
+
+def test_authentication_retry_gets_a_fresh_budget_without_becoming_a_2fa_error(
+    auth_module, login_state, monkeypatch
+):
+    auth, page, _clock = login_state(frames=[_active_frame()])
+    _prepare_real_login_outcome(auth_module, auth, page, monkeypatch, ChallengeSignal.FAILURE)
+    auth_module.settings.AUTH_MAX_ATTEMPTS = 2
+    page.on = Mock()
+    page.context = SimpleNamespace(clear_cookies=AsyncMock())
+    monkeypatch.setattr(auth, "_replace_page", AsyncMock())
+
+    assert asyncio.run(auth.invoke()) is False
+
+    assert auth_module.wait_for_challenge_signal.await_count == 6
+    assert auth._captcha_solve_attempts == 3
+    auth._replace_page.assert_awaited_once()
+    logs = "\n".join(auth_module.test_messages)
+    assert "after 2 attempts" in logs
+    assert "two-factor" not in logs
+    assert "2FA is still enabled" not in logs
+
+
+def test_success_observation_does_not_spend_remaining_captcha_budget(
+    auth_module, login_state, monkeypatch
+):
+    auth, page, clock = login_state(frames=[_active_frame()])
+    _prepare_real_login_outcome(auth_module, auth, page, monkeypatch, ChallengeSignal.SUCCESS)
+    solve_times = []
+
+    async def solve(_agent, **_kwargs):
+        solve_times.append(clock.now)
+        if len(solve_times) == 3:
+            auth._is_login_success_signal.put_nowait({"authenticated": True})
+        return ChallengeSignal.SUCCESS if len(solve_times) != 2 else ChallengeSignal.FAILURE
+
+    solver = AsyncMock(side_effect=solve)
+    monkeypatch.setattr(auth_module, "wait_for_challenge_signal", solver)
+
+    assert asyncio.run(auth._login()) is True
+
+    assert solver.await_count == 3
+    assert solve_times[1] - solve_times[0] >= 3.0
+    assert auth._captcha_solve_attempts == 3
+
+
+def test_real_mfa_challenge_uses_the_remaining_login_budget(auth_module, login_state, monkeypatch):
+    auth, page, _clock = login_state(url=f"{LOGIN_URL}/mfa")
+    calls = []
+
+    async def solve(_agent, *, context, **_kwargs):
+        calls.append(context)
+        if len(calls) == 2:
+            auth._is_login_success_signal.put_nowait({"authenticated": True})
+        return ChallengeSignal.SUCCESS
+
+    async def submit_mfa(_page, **_kwargs):
+        page.frames = [_active_frame()]
+        return True
+
+    monkeypatch.setattr(auth_module, "wait_for_challenge_signal", AsyncMock(side_effect=solve))
+    submit = AsyncMock(side_effect=submit_mfa)
+    monkeypatch.setattr(auth_module, "submit_totp_challenge", submit)
+
+    async def login_then_mfa():
+        await auth._wait_for_login_challenge(object(), context="login:1", timeout_seconds=10)
+        await auth._await_login_outcome(
+            LOGIN_URL, object(), timeout_seconds=10, challenge_succeeded=True
+        )
+
+    asyncio.run(login_then_mfa())
+
+    assert calls == ["login:1", "login_mfa"]
+    assert auth._captcha_solve_attempts == 2
+    assert auth._totp_attempts == 1
+    submit.assert_awaited_once()
 
 
 def _response(url, *, payload=None, status=200, method="POST", non_json=False):

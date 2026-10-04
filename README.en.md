@@ -173,6 +173,8 @@ For the `Qwen3-VL-32B-Instruct` example above, leave `GLM_ENABLE_THINKING` and `
 
 **Login rejected after a captcha passes:** `Challenge success` confirms the captcha service's result, not Epic authentication. If the Epic page displays `Incorrect response. Please refresh the page.`, the application detects the rejection and uses its existing bounded retry flow instead of waiting for a login timeout. A briefly remaining challenge after success does not immediately trigger another solve; a subsequent visible challenge can still be handled. `Epic authentication response` logs contain only the endpoint category, HTTP status, JSON type and a filtered error code, without response bodies or URLs containing query parameters. Use these logs together with failure screenshots; that page message alone cannot establish whether the cause is the model, network environment or Epic's validation.
 
+Each password login attempt permits at most **3 captcha solver calls**, shared by the initial solve and challenges encountered while awaiting the login result. Successful, failed and exceptional calls all count; observing the page does not. Exhausting this budget enters the existing authentication retry flow, still bounded by `AUTH_MAX_ATTEMPTS` and time deadlines. One solve may contain multiple images or model requests, so this is not an API request limit. Local outline matching excludes source regions using the positions and sizes supplied by the challenge instead of assuming a fixed left/right layout; uncertain cases fall back to the model.
+
 If you use the `official Gemini API`, use this set:
 
 **If you set `LLM_PROVIDER=gemini`, you must provide `GEMINI_API_KEY`; there is no need to create or fill `GLM_API_KEY`.**
