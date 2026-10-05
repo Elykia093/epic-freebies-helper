@@ -152,7 +152,7 @@ Fork 之后先打开自己仓库的 `Actions` 页面，进入 `Epic Awesome Game
 > [!IMPORTANT]
 > 不要看到工作流运行了 5 分钟左右还在重试就手动取消。登录验证码和 checkout 二次校验可能会连续失败、反复重试，甚至中途出现 timeout；这属于正常现象，有些最终成功的案例会持续 15 到 20 分钟。
 
-如果某次 runner 上 `Camoufox` 下载失败或启动失败，新的工作流会继续依赖已安装的 Playwright Firefox 回退运行，而不是直接在浏览器准备阶段终止。
+Actions 默认使用锁定的 Camoufox 0.5.7 及其配对浏览器；下载失败或版本不匹配时停止。需要显式回退时，将仓库变量 `BROWSER_BACKEND` 设为 `playwright`。硅基流动配置见 [README](../../README.md)。请求、执行和响应超时可通过同名变量 `GLM_REQUEST_TIMEOUT_SECONDS`、`EXECUTION_TIMEOUT`、`RESPONSE_TIMEOUT` 覆盖，默认分别为 50、120、30 秒。
 
 ## Fork 后如何和主仓库同步
 

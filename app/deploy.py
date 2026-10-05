@@ -22,6 +22,7 @@ from loguru import logger
 from pytz import timezone
 
 from accounts import get_epic_accounts_raw, mask_email, parse_multi_accounts, swap_account
+from extensions.llm_errors import LLMConfigurationError, llm_request_boundary
 from services.epic_authorization_service import EpicAuthorization
 from services.browser_context import open_browser_context, resolve_headless_mode
 from services.epic_collection_summary_service import collect_epic_games_with_summary
@@ -78,7 +79,7 @@ async def execute_browser_tasks(headless: bool | str = True, *, collect_summary:
     logger.debug("Starting Epic Games collection task")
 
     # Configure browser with anti-detection features and video recording
-    async with open_browser_context(headless=headless) as browser:
+    async with llm_request_boundary(), open_browser_context(headless=headless) as browser:
         # Initialize or reuse existing browser page
         page = browser.pages[0] if browser.pages else await browser.new_page()
         logger.debug("Browser initialized successfully")
@@ -194,6 +195,9 @@ async def execute_multiple_accounts(
             else:
                 succeeded += 1
                 logger.success("Account {}/{} completed: {}", index, total, masked_email)
+        except LLMConfigurationError:
+            logger.error("LLM configuration failed; stopping remaining accounts")
+            raise
         except Exception as err:
             failed_accounts.append(masked_email)
             logger.error("Account {}/{} failed: {} | error: {}", index, total, masked_email, err)

@@ -13,6 +13,9 @@ from hcaptcha_challenger.models import ChallengeTypeEnum, RequestType
 from loguru import logger
 from pydantic import BaseModel
 
+from extensions.llm_errors import LLMRequestAbort, LLMResponseError
+from extensions.spatial_coordinates import NORMALIZED_SPATIAL_INSTRUCTION
+
 CHALLENGE_TYPE_VALUES = frozenset(member.value for member in ChallengeTypeEnum)
 REQUEST_TYPE_VALUES = frozenset(member.value for member in RequestType)
 KNOWN_CHALLENGE_TYPES = CHALLENGE_TYPE_VALUES | REQUEST_TYPE_VALUES
@@ -1047,10 +1050,32 @@ class _GLMAsyncFiles:
         return _UploadedFile(uri=uri, mime_type=mime_type)
 
 
+def _api_error_details(response: httpx.Response) -> tuple[str, str]:
+    """Read both OpenAI's nested errors and SiliconFlow's top-level errors."""
+    try:
+        payload = response.json()
+    except ValueError:
+        return "", ""
+    if not isinstance(payload, dict):
+        return "", ""
+    error = payload.get("error") or payload
+    if not isinstance(error, dict):
+        return "", ""
+    return str(error.get("code") or ""), str(error.get("message") or "")
+
+
+def _json_mode_is_unsupported(response: httpx.Response) -> bool:
+    if response.status_code != 400:
+        return False
+    code, message = _api_error_details(response)
+    return code == "20024" or "json mode is not supported" in message.casefold()
+
+
 class _GLMAsyncModels:
     def __init__(self, settings: Any, storage: dict[str, dict[str, Any]]):
         self._settings = settings
         self._storage = storage
+        self._models_without_json_mode: set[str] = set()
 
     def _to_image_part(self, payload: bytes, mime_type: str) -> dict[str, Any]:
         encoded = base64.b64encode(payload).decode("utf-8")
@@ -1093,6 +1118,15 @@ class _GLMAsyncModels:
         if system_instruction:
             system_messages.append(str(system_instruction))
 
+        response_schema = getattr(config, "response_schema", None)
+        if isinstance(response_schema, type) and issubclass(response_schema, BaseModel):
+            # Keep the output contract even when the endpoint rejects JSON mode.
+            system_messages.append(
+                "Return only a JSON object matching this JSON Schema. "
+                "Do not include Markdown fences or explanations in the final answer.\n"
+                + json.dumps(response_schema.model_json_schema(), ensure_ascii=False)
+            )
+
         for content in _ensure_list(contents):
             role = getattr(content, "role", None) or "user"
             items = []
@@ -1106,7 +1140,7 @@ class _GLMAsyncModels:
                 continue
             messages.append({"role": role, "content": items})
 
-        if has_image:
+        if has_image and system_instruction != NORMALIZED_SPATIAL_INSTRUCTION:
             system_messages.append(GLM_VISUAL_COORDINATE_INSTRUCTION)
             response_fields = _schema_field_names(getattr(config, "response_schema", None))
             if "paths" in response_fields:
@@ -1131,21 +1165,34 @@ class _GLMAsyncModels:
         if temperature is not None:
             payload["temperature"] = temperature
 
-        if getattr(config, "response_schema", None) is not None:
+        if (
+            getattr(config, "response_schema", None) is not None
+            and model not in self._models_without_json_mode
+        ):
             payload["response_format"] = {"type": "json_object"}
 
         if thinking_payload := _glm_thinking_payload(model, config):
             payload["thinking"] = thinking_payload
 
+        max_tokens = getattr(self._settings, "GLM_MAX_TOKENS", None)
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+
         payload.update({k: v for k, v in kwargs.items() if k not in {"config"}})
         return payload
 
     def _extract_text(self, data: dict[str, Any]) -> str:
-        choices = data.get("choices") or []
-        if not choices:
-            raise ValueError("GLM response does not contain choices")
-
-        message = choices[0].get("message") or {}
+        choices = data.get("choices") if isinstance(data, dict) else None
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise LLMResponseError("LLM response does not contain a valid choice")
+        choice = choices[0]
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            raise LLMResponseError("LLM response does not contain a valid message")
+        if choice.get("finish_reason") in ("length", "max_tokens"):
+            raise LLMResponseError("LLM response was truncated; check GLM_MAX_TOKENS")
+        if message.get("refusal") or choice.get("finish_reason") in ("content_filter", "safety"):
+            raise LLMResponseError("LLM response was refused or filtered")
         content = message.get("content")
 
         if isinstance(content, str):
@@ -1182,7 +1229,6 @@ class _GLMAsyncModels:
                         text,
                     )
                 else:
-                    logger.warning("GLM structured parse fallback failed | raw_text={}", text[:500])
                     return None
 
         if isinstance(schema, type) and issubclass(schema, BaseModel):
@@ -1192,13 +1238,7 @@ class _GLMAsyncModels:
 
     def _log_glm_error(self, response: httpx.Response):
         body = response.text[:2000]
-        code = ""
-        message = ""
-        with suppress(Exception):
-            payload = response.json()
-            error = payload.get("error") or {}
-            code = str(error.get("code") or "")
-            message = str(error.get("message") or "")
+        code, message = _api_error_details(response)
 
         if response.status_code == 429 or code in {"1302", "1303", "1304", "1308", "1113"}:
             logger.error(
@@ -1243,6 +1283,18 @@ class _GLMAsyncModels:
         ) as client:
             try:
                 response = await client.post(endpoint, headers=headers, json=payload)
+                if payload.get("response_format") == {
+                    "type": "json_object"
+                } and _json_mode_is_unsupported(response):
+                    # Retry only this explicit capability rejection, once. Other
+                    # 400s (including invalid image messages) must not be hidden.
+                    self._models_without_json_mode.add(model)
+                    payload.pop("response_format")
+                    logger.warning(
+                        "LLM endpoint does not support JSON mode; retrying once without "
+                        "response_format. JSON instructions and validation remain enabled."
+                    )
+                    response = await client.post(endpoint, headers=headers, json=payload)
             except httpx.TimeoutException as err:
                 raise TimeoutError(
                     f"GLM request timed out after {request_timeout:g} seconds "
@@ -1250,11 +1302,30 @@ class _GLMAsyncModels:
                 ) from err
             if response.is_error:
                 self._log_glm_error(response)
+                if response.status_code in {400, 401, 403, 404, 405, 413, 415, 422}:
+                    raise LLMRequestAbort(
+                        f"LLM request rejected (HTTP {response.status_code}). "
+                        "Check the model, endpoint, credentials and request parameters "
+                        "before retrying.",
+                        # Other 4xx responses can depend on this image or request.
+                        is_configuration_error=response.status_code in {401, 404, 405},
+                    ) from None
                 response.raise_for_status()
             data = response.json()
 
-        text = _normalize_glm_response_text(self._extract_text(data))
-        parsed = self._parse_response(text, config)
+        try:
+            text = _normalize_glm_response_text(self._extract_text(data))
+            if not text:
+                raise LLMResponseError("LLM returned an empty final answer")
+            parsed = self._parse_response(text, config)
+        except LLMResponseError:
+            raise
+        except (ValueError, TypeError, KeyError):
+            raise LLMResponseError("LLM final answer failed parsing or schema validation") from None
+        if getattr(config, "response_schema", None) is not None and parsed is None:
+            raise LLMResponseError(
+                "LLM final answer did not contain the required structured response"
+            )
         return _PatchedResponse(text=text, parsed=parsed, raw=data)
 
 

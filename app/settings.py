@@ -60,7 +60,8 @@ class EpicSettings(AgentConfig):
     )
 
     GLM_MODEL: str = Field(default="glm-4.6v", description="GLM vision-capable default model")
-    GLM_REQUEST_TIMEOUT_SECONDS: float = Field(default=50.0, gt=5.0, le=120.0)
+    GLM_REQUEST_TIMEOUT_SECONDS: float = Field(default=50.0, gt=5.0, le=120.0, allow_inf_nan=False)
+    GLM_MAX_TOKENS: int | None = Field(default=None, ge=1)
 
     BROWSER_BACKEND: str = Field(
         default="auto", description="Supported values: auto, camoufox, playwright"
@@ -79,6 +80,8 @@ class EpicSettings(AgentConfig):
         default=False,
         description="Disable hcaptcha-challenger recursive retries; callers own retry limits.",
     )
+    EXECUTION_TIMEOUT: float = Field(default=120.0, gt=0, allow_inf_nan=False)
+    RESPONSE_TIMEOUT: float = Field(default=30.0, gt=0, allow_inf_nan=False)
     WAIT_FOR_CHALLENGE_VIEW_TO_RENDER_MS: int = Field(default=3000)
 
     CHALLENGE_CLASSIFIER_MODEL: str = Field(default="")

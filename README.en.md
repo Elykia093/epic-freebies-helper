@@ -141,6 +141,8 @@ If you use `GLM`, start with this set:
 | `GLM_BASE_URL` | https://open.bigmodel.cn/api/paas/v4 |
 | `GLM_MODEL` | glm-4.6v |
 
+For SiliconFlow, use `LLM_PROVIDER=glm`, put the SiliconFlow key in `GLM_API_KEY`, and set `GLM_BASE_URL=https://api.siliconflow.cn/v1` and `GLM_MODEL=Qwen/Qwen3-VL-32B-Instruct`. Leave the four model overrides empty. `GLM_MAX_TOKENS` is optional; empty uses the endpoint default. Truncated responses are rejected.
+
 Configuration page example:
 ![GLM API setup](docs/images/tutorial/GLM-API.png)
 
@@ -216,7 +218,7 @@ Notes:
 - If `EPIC_ACCOUNTS` contains **no valid lines**, the job falls back only when both `EPIC_EMAIL` and `EPIC_PASSWORD` are configured. Otherwise, it fails with a configuration error before starting a browser with empty credentials.
 - If `EPIC_ACCOUNTS` is set with **some valid and some invalid lines**, the job fails with a configuration error that lists the invalid line numbers. It will not silently skip bad lines and still report success.
 - Email shape is lightly validated, including rejection of path separators and control characters. If a password contains a colon `:`, only the first colon is used as the separator.
-- Each account runs independently: one account's failure does not affect the others. Each account still reuses the current login, hCaptcha, TOTP, Telegram, WXPush, and browser runtime path.
+- Each account runs independently: one account's failure does not affect the others. Each account still reuses the current login, hCaptcha, TOTP, Telegram, WXPush, and browser runtime path. Explicit shared authentication or endpoint errors (HTTP 401/404/405) stop the batch; other unrecoverable image or request rejections only end the current account.
 - Each account automatically gets its own isolated browser profile directory keyed by email.
 - Multi-account Telegram / WXPush messages include a masked account label. Single-account formatting is unchanged when no label is supplied.
 - `EPIC_TOTP_SECRET` remains a global setting for now. It fits a shared authenticator secret, or enabling TOTP for only one of the accounts. Per-account TOTP is not supported yet.

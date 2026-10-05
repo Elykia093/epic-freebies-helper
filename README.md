@@ -148,6 +148,8 @@ WXPush 与 Telegram 相互独立、可同时启用。受微信模板消息限制
 | `GLM_BASE_URL` | https://open.bigmodel.cn/api/paas/v4 |
 | `GLM_MODEL` | glm-4.6v |
 
+硅基流动也使用 `LLM_PROVIDER=glm`：将 `GLM_API_KEY` 填为硅基密钥，`GLM_BASE_URL=https://api.siliconflow.cn/v1`，`GLM_MODEL=Qwen/Qwen3-VL-32B-Instruct`；四个子模型覆盖项留空即可。`GLM_MAX_TOKENS` 可选，留空使用服务端默认值；截断响应会被拒绝。
+
 配置页面示例：
 ![GLM API获取](docs/images/tutorial/GLM-API.png)
 
@@ -223,7 +225,7 @@ user3@example.com:password3
 - 设置了 `EPIC_ACCOUNTS` 但**没有任何合法行**时，仅当 `EPIC_EMAIL` / `EPIC_PASSWORD` 均已配置才回退到原单账号路径；否则立即报告配置错误，不会以空凭据启动浏览器。
 - 设置了 `EPIC_ACCOUNTS` 且**部分行合法、部分行非法**时，任务会直接以配置错误失败（指出非法行号），不会静默跳过某些账号后报成功。
 - 邮箱格式会做轻量校验，并拒绝路径分隔符与控制字符；密码中如果包含冒号 `:`，只会按第一个冒号分割。
-- 每个账号独立运行：一个账号失败不影响其他账号；每个账号仍复用当前的登录、hCaptcha、TOTP、Telegram、WXPush 与浏览器运行时路径。
+- 每个账号独立运行：一个账号失败不影响其他账号；每个账号仍复用当前的登录、hCaptcha、TOTP、Telegram、WXPush 与浏览器运行时路径。 明确识别的共享鉴权或端点错误（HTTP 401/404/405）会提前停止整个批次；其他不可恢复的图片或请求拒绝只结束当前账号。
 - 每个账号自动使用独立的浏览器配置目录（按邮箱隔离），互不干扰。
 - 多账号 Telegram / WXPush 通知会附带打码后的账号标签；单账号通知格式保持不变。
 - 当前 `EPIC_TOTP_SECRET` 仍是全局配置，适合同一验证器密钥，或只给其中一个账号开 TOTP 的场景；按账号拆分 TOTP 还不支持。

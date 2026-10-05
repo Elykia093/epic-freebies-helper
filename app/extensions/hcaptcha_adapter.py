@@ -2,6 +2,7 @@
 import asyncio
 import itertools
 from contextlib import suppress
+from math import ceil, floor, isfinite
 from pathlib import Path
 from typing import Any
 
@@ -9,12 +10,25 @@ import cv2
 import httpx
 import numpy as np
 from hcaptcha_challenger.agent.challenger import AgentV, RoboticArm
-from hcaptcha_challenger.models import CaptchaResponse, PointCoordinate, SpatialPath
+from hcaptcha_challenger.models import (
+    CaptchaResponse,
+    ImageAreaSelectChallenge,
+    ImageDragDropChallenge,
+    PointCoordinate,
+    SpatialPath,
+)
 from loguru import logger
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from extensions.numbered_line_solver import solve_numbered_line_drag
-
+from extensions.spatial_coordinates import (
+    NORMALIZED_SPATIAL_INSTRUCTION,
+    same_bounds,
+    to_page_paths,
+    to_page_point,
+    unique_points,
+    uses_normalized_coordinates,
+)
 
 _EMPTY_CHECKCAPTCHA_GRACE_SECONDS = 5.0
 
@@ -157,7 +171,10 @@ def _point_answer_validation_error(
     )
     for point in points:
         coordinates = float(point.x), float(point.y)
-        if not _point_inside_bounds(coordinates, challenge_bounds):
+        x, y = coordinates
+        left, top, right, bottom = challenge_bounds
+        # CSS rectangles exclude the right/bottom edges, including points rounded onto them.
+        if not (left <= x < right and top <= y < bottom):
             return f"point {coordinates} is outside challenge bounds {challenge_bounds}"
         if clickable_bounds is not None and not _point_inside_bounds(coordinates, clickable_bounds):
             return f"point {coordinates} is outside clickable grid {clickable_bounds}"
@@ -205,6 +222,42 @@ def _is_count_selection_question(question: str) -> bool:
     return "animal" in normalized and "count" in normalized
 
 
+def _normalized_point_prompt(
+    question: str, raw: Path, image_bounds: tuple[int, int, int, int] | None
+) -> str:
+    if image_bounds is None:
+        return question
+    image = cv2.imread(str(raw))
+    if image is None:
+        raise ValueError("Cannot read the captured challenge image")
+    height, width = image.shape[:2]
+    x0, y0, x1, y1 = image_bounds
+    return (
+        f"{question}\n\nThe interactive area in this image's 0..1000 coordinate system is "
+        f"x={x0 / width * 1000:.1f}..{x1 / width * 1000:.1f}, "
+        f"y={y0 / height * 1000:.1f}..{y1 / height * 1000:.1f}. "
+        "Select targets only inside this area. Header pictures, example animals and count "
+        "badges outside it are references, not targets."
+    )
+
+
+async def _request_spatial_response(
+    reasoner: Any, raw: Path, projection: Path, prompt: str, schema: Any, *, normalized: bool
+):
+    if normalized:
+        # Qwen3-VL grounding uses one image and 0..1000 coordinates. Do not send
+        # the differently sized grid canvas or ask it to read page-axis labels.
+        return await reasoner._provider.generate_with_images(
+            images=[raw],
+            user_prompt=prompt,
+            description=NORMALIZED_SPATIAL_INSTRUCTION,
+            response_schema=schema,
+        )
+    return await reasoner(
+        challenge_screenshot=raw, grid_divisions=projection, auxiliary_information=prompt
+    )
+
+
 def _entity_centers(captcha_payload: Any, crumb_id: int) -> list[tuple[int, int]]:
     tasklist = getattr(captcha_payload, "tasklist", None) or []
     if crumb_id < 0 or crumb_id >= len(tasklist):
@@ -212,10 +265,18 @@ def _entity_centers(captcha_payload: Any, crumb_id: int) -> list[tuple[int, int]
 
     centers: list[tuple[int, int]] = []
     for entity in getattr(tasklist[crumb_id], "entities", None) or []:
-        coords = getattr(entity, "coords", None) or []
-        if len(coords) < 2:
+        coords = getattr(entity, "coords", None)
+        if not isinstance(coords, (list, tuple)) or len(coords) != 2:
             return []
-        centers.append((int(coords[0]), int(coords[1])))
+        try:
+            if any(
+                isinstance(value, bool) or not isfinite(value) or value < 0 or int(value) != value
+                for value in coords
+            ):
+                return []
+            centers.append((int(coords[0]), int(coords[1])))
+        except (TypeError, ValueError, OverflowError):
+            return []
     return centers
 
 
@@ -292,8 +353,41 @@ def _correct_drag_source_points(
     return paths
 
 
+def _source_entity_rectangles(
+    entities: list[Any], *, canvas_width: int, canvas_height: int
+) -> list[tuple[float, float, float, float]] | None:
+    """Read source rectangles in task-canvas coordinates without guessing their side."""
+    if not entities:
+        return None
+    rectangles = []
+    for entity in entities:
+        coords = getattr(entity, "coords", None)
+        size = getattr(entity, "size", None)
+        if not isinstance(coords, (list, tuple)) or not isinstance(size, (list, tuple)):
+            return None
+        if len(coords) != 2 or len(size) != 2:
+            return None
+        raw_values = (*coords, *size)
+        try:
+            if any(isinstance(value, bool) or not isfinite(value) for value in raw_values):
+                return None
+            center_x, center_y, width, height = map(float, raw_values)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not all(isfinite(value) for value in (center_x, center_y, width, height)):
+            return None
+        if width <= 0 or height <= 0:
+            return None
+        left, top = center_x - width / 2, center_y - height / 2
+        right, bottom = center_x + width / 2, center_y + height / 2
+        if not (0 <= left < right <= canvas_width and 0 <= top < bottom <= canvas_height):
+            return None
+        rectangles.append((left, top, right, bottom))
+    return rectangles
+
+
 def _extract_outline_targets(
-    challenge_screenshot: Path,
+    challenge_screenshot: Path, *, source_entities: list[Any]
 ) -> list[tuple[np.ndarray, tuple[float, float]]]:
     image = cv2.imread(str(challenge_screenshot))
     canvas_origin = _detect_task_canvas_origin(challenge_screenshot)
@@ -302,9 +396,16 @@ def _extract_outline_targets(
 
     origin_x, origin_y = canvas_origin
     task_canvas = image[origin_y:, origin_x:]
+    source_rectangles = _source_entity_rectangles(
+        source_entities, canvas_width=task_canvas.shape[1], canvas_height=task_canvas.shape[0]
+    )
+    if source_rectangles is None:
+        logger.warning("Could not establish hCaptcha draggable source regions; falling back to LLM")
+        return []
     hsv = cv2.cvtColor(task_canvas, cv2.COLOR_BGR2HSV)
     outline_mask = ((hsv[:, :, 1] < 100) & (hsv[:, :, 2] > 140)).astype(np.uint8) * 255
-    outline_mask[:, int(task_canvas.shape[1] * 0.68) :] = 0
+    for left, top, right, bottom in source_rectangles:
+        outline_mask[floor(top) : ceil(bottom), floor(left) : ceil(right)] = 0
     outline_mask = cv2.morphologyEx(outline_mask, cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8))
 
     count, labels, stats, _ = cv2.connectedComponentsWithStats(outline_mask)
@@ -313,7 +414,10 @@ def _extract_outline_targets(
         x, y, width, height, area = (int(value) for value in stats[index])
         if not (400 <= area <= 3000 and width >= 35 and height >= 35):
             continue
-        if x >= task_canvas.shape[1] * 0.68 or y >= task_canvas.shape[0] * 0.88:
+        if any(
+            x < right and x + width > left and y < bottom and y + height > top
+            for left, top, right, bottom in source_rectangles
+        ):
             continue
 
         component = (labels == index).astype(np.uint8) * 255
@@ -540,14 +644,16 @@ async def _resolve_outline_paths(
     if "outline" not in question:
         return None
 
+    targets = _extract_outline_targets(challenge_screenshot, source_entities=entities)
+    if len(targets) < len(entities):
+        return None
     source_points = _payload_source_points(
         captcha_payload=captcha_payload,
         crumb_id=crumb_id,
         challenge_screenshot=challenge_screenshot,
         challenge_bbox=challenge_bbox,
     )
-    targets = _extract_outline_targets(challenge_screenshot)
-    if len(source_points) != len(entities) or len(targets) < len(entities):
+    if len(source_points) != len(entities):
         return None
 
     try:
@@ -613,6 +719,30 @@ def _build_drag_prompt(user_prompt: str, *, source_points: list[tuple[int, int]]
             "Reject any candidate at marker 3, marker 5, or a distant unrelated empty area."
         )
     return f"{user_prompt}\n\n{details}"
+
+
+def _build_normalized_spatial_prompt(
+    user_prompt: str, *, captcha_payload: Any, source_points: list[tuple[int, int]] | None = None
+) -> str:
+    question = None
+    with suppress(Exception):
+        question = captcha_payload.get_requester_question()
+    parts = []
+    if isinstance(question, str) and question.strip() and question.strip() not in user_prompt:
+        parts.append(f"Task instruction: {question.strip()}")
+    parts.append(user_prompt)
+    if source_points is not None:
+        if source_points:
+            parts.append(
+                f"Available draggable candidates in the payload: {len(source_points)}. "
+                "This describes the available candidates, not a required number of moves."
+            )
+        parts.append(
+            "Identify which objects the task requires moving and match each to its destination. "
+            "Return a separate path for each required move; do not combine separate moves into "
+            "one path or omit a required move."
+        )
+    return "\n\n".join(parts)
 
 
 def _cancel_pending_empty_response(agent: Any) -> None:
@@ -684,12 +814,16 @@ def apply_hcaptcha_drag_patch() -> None:
 
             for cid in range(crumb_count):
                 await self.page.wait_for_timeout(self.config.WAIT_FOR_CHALLENGE_VIEW_TO_RENDER_MS)
+                view = frame_challenge.locator("//div[@class='challenge-view']")
+                capture_bbox = await view.bounding_box()
                 raw, projection = await self._capture_spatial_mapping(
                     frame_challenge, cache_key, cid
                 )
                 challenge_bbox = await frame_challenge.locator(
                     "//div[@class='challenge-view']"
                 ).bounding_box()
+                if not same_bounds(capture_bbox, challenge_bbox):
+                    raise ValueError("Challenge bounds changed during screenshot capture")
                 base_prompt = self._match_user_prompt(job_type)
                 image_grid_bounds = (
                     _detect_clickable_grid_bounds(raw)
@@ -702,20 +836,43 @@ def apply_hcaptcha_drag_patch() -> None:
                         image_grid_bounds, challenge_screenshot=raw, challenge_bbox=challenge_bbox
                     )
 
-                user_prompt = _build_point_prompt(
-                    base_prompt, challenge_bbox=challenge_bbox, clickable_bounds=clickable_bounds
+                normalized = uses_normalized_coordinates(self.config.SPATIAL_POINT_REASONER_MODEL)
+                user_prompt = (
+                    _normalized_point_prompt(base_prompt, raw, image_grid_bounds)
+                    if normalized
+                    else _build_point_prompt(
+                        base_prompt,
+                        challenge_bbox=challenge_bbox,
+                        clickable_bounds=clickable_bounds,
+                    )
                 )
-                response = await self._spatial_point_reasoner(
-                    challenge_screenshot=raw,
-                    grid_divisions=projection,
-                    auxiliary_information=user_prompt,
+                if normalized:
+                    user_prompt = _build_normalized_spatial_prompt(
+                        user_prompt, captcha_payload=self.captcha_payload
+                    )
+                response = await _request_spatial_response(
+                    self._spatial_point_reasoner,
+                    raw,
+                    projection,
+                    user_prompt,
+                    ImageAreaSelectChallenge,
+                    normalized=normalized,
                 )
                 logger.debug(f'[{cid+1}/{crumb_count}]ToolInvokeMessage: {response.log_message}')
-
+                self._spatial_point_reasoner.cache_response(
+                    path=cache_key.joinpath(f"{cache_key.name}_{cid}_model_answer.json")
+                )
+                points = (
+                    [to_page_point(point, challenge_bbox) for point in response.points]
+                    if normalized
+                    else response.points
+                )
+                points = unique_points(points)
+                current_bbox = await view.bounding_box()
+                if not same_bounds(challenge_bbox, current_bbox):
+                    raise ValueError("Challenge bounds changed while waiting for the model answer")
                 validation_error = _point_answer_validation_error(
-                    response.points,
-                    challenge_bbox=challenge_bbox,
-                    clickable_bounds=clickable_bounds,
+                    points, challenge_bbox=current_bbox, clickable_bounds=clickable_bounds
                 )
                 if validation_error is not None:
                     logger.warning(
@@ -723,10 +880,9 @@ def apply_hcaptcha_drag_patch() -> None:
                     )
                     raise ValueError(f"Unsafe hCaptcha point answer: {validation_error}")
 
-                self._spatial_point_reasoner.cache_response(
-                    path=cache_key.joinpath(f"{cache_key.name}_{cid}_model_answer.json")
-                )
-                for point in response.points:
+                for point in points:
+                    if not same_bounds(challenge_bbox, await view.bounding_box()):
+                        raise ValueError("Challenge bounds changed before clicking a target")
                     await self.page.mouse.click(point.x, point.y, delay=180)
                     await self.page.wait_for_timeout(500)
 
@@ -747,10 +903,14 @@ def apply_hcaptcha_drag_patch() -> None:
 
         for cid in range(crumb_count):
             await self.page.wait_for_timeout(self.config.WAIT_FOR_CHALLENGE_VIEW_TO_RENDER_MS)
+            view = frame_challenge.locator("//div[@class='challenge-view']")
+            capture_bbox = await view.bounding_box()
             raw, projection = await self._capture_spatial_mapping(frame_challenge, cache_key, cid)
             challenge_bbox = await frame_challenge.locator(
                 "//div[@class='challenge-view']"
             ).bounding_box()
+            if not same_bounds(capture_bbox, challenge_bbox):
+                raise ValueError("Challenge bounds changed during screenshot capture")
             user_prompt = self._match_user_prompt(job_type)
             paths = _resolve_line_path(
                 captcha_payload=self.captcha_payload,
@@ -772,26 +932,51 @@ def apply_hcaptcha_drag_patch() -> None:
                     challenge_screenshot=raw,
                     challenge_bbox=challenge_bbox,
                 )
-                response = await self._spatial_path_reasoner(
-                    challenge_screenshot=raw,
-                    grid_divisions=projection,
-                    auxiliary_information=_build_drag_prompt(
-                        user_prompt, source_points=source_points
+                normalized = uses_normalized_coordinates(self.config.SPATIAL_PATH_REASONER_MODEL)
+                response = await _request_spatial_response(
+                    self._spatial_path_reasoner,
+                    raw,
+                    projection,
+                    (
+                        _build_normalized_spatial_prompt(
+                            user_prompt,
+                            captcha_payload=self.captcha_payload,
+                            source_points=source_points,
+                        )
+                        if normalized
+                        else _build_drag_prompt(user_prompt, source_points=source_points)
                     ),
+                    ImageDragDropChallenge,
+                    normalized=normalized,
                 )
                 logger.debug(f'[{cid+1}/{crumb_count}]ToolInvokeMessage: {response.log_message}')
                 self._spatial_path_reasoner.cache_response(
                     path=cache_key.joinpath(f"{cache_key.name}_{cid}_model_answer.json")
                 )
+                model_paths = (
+                    to_page_paths(response.paths, challenge_bbox) if normalized else response.paths
+                )
                 paths = _correct_drag_source_points(
-                    response.paths,
+                    model_paths,
                     captcha_payload=self.captcha_payload,
                     crumb_id=cid,
                     challenge_screenshot=raw,
                     challenge_bbox=challenge_bbox,
                 )
 
+            current_bbox = await view.bounding_box()
+            if not same_bounds(challenge_bbox, current_bbox):
+                raise ValueError("Challenge bounds changed while preparing drag paths")
+            validation_error = _point_answer_validation_error(
+                [point for path in paths for point in (path.start_point, path.end_point)],
+                challenge_bbox=current_bbox,
+                clickable_bounds=None,
+            )
+            if validation_error:
+                raise ValueError(f"Unsafe hCaptcha drag answer: {validation_error}")
             for path in paths:
+                if not same_bounds(challenge_bbox, await view.bounding_box()):
+                    raise ValueError("Challenge bounds changed before performing a drag")
                 await self._perform_drag_drop(path)
 
             with suppress(PlaywrightTimeoutError):

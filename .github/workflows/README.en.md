@@ -153,7 +153,7 @@ After forking, open the `Actions` page in your fork, enter `Epic Awesome Gamer (
 > [!IMPORTANT]
 > Do not cancel the workflow just because it is still retrying after around 5 minutes. Login captcha and checkout verification can fail repeatedly, retry many times, and even hit timeouts before finally passing. Some successful runs still take 15 to 20 minutes.
 
-If `Camoufox` fails to download or bootstrap on a specific runner, the workflow now continues with an installed Playwright Firefox fallback instead of failing immediately during browser setup.
+Actions defaults to locked Camoufox 0.5.7 and its paired browser; a download failure or version mismatch stops the job. Set repository variable `BROWSER_BACKEND=playwright` for an explicit fallback. See [README](../../README.en.md) for SiliconFlow settings. Request, execution and response timeouts can be overridden with `GLM_REQUEST_TIMEOUT_SECONDS`, `EXECUTION_TIMEOUT` and `RESPONSE_TIMEOUT`; their defaults are 50, 120 and 30 seconds.
 
 ## Keeping Your Fork Updated
 
