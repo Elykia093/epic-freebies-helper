@@ -189,6 +189,67 @@ def _point_inside_bounds(
     return x_min <= x <= x_max and y_min <= y <= y_max
 
 
+def _multiple_choice_point_limits(captcha_payload: Any) -> tuple[int | None, int | None]:
+    request_config = getattr(captcha_payload, "request_config", None)
+    if request_config is None:
+        return None, None
+
+    def read_limit(name: str) -> int | None:
+        value = (
+            request_config.get(name)
+            if isinstance(request_config, dict)
+            else getattr(request_config, name, None)
+        )
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+
+    minimum = read_limit("multiple_choice_min_choices")
+    maximum = read_limit("multiple_choice_max_choices")
+    if minimum is not None and maximum is not None and minimum > maximum:
+        return None, None
+    return minimum, maximum
+
+
+def _selection_count_error(
+    points: list[Any], *, minimum: int | None, maximum: int | None
+) -> str | None:
+    count = len(points)
+    if minimum is not None and count < minimum:
+        return f"answer has {count} points; this image requires at least {minimum}"
+    if maximum is not None and count > maximum:
+        return f"answer has {count} points; this image allows at most {maximum}"
+    return None
+
+
+def _selection_limit_prompt(prompt: str, *, minimum: int | None, maximum: int | None) -> str:
+    if minimum is None and maximum is None:
+        return prompt
+    if minimum is not None and minimum == maximum:
+        point_word = "point" if minimum == 1 else "points"
+        limit = f"exactly {minimum} distinct {point_word}"
+    elif minimum is not None and maximum is not None:
+        limit = f"between {minimum} and {maximum} distinct points"
+    elif minimum is not None:
+        limit = f"at least {minimum} distinct points"
+    else:
+        limit = f"at most {maximum} distinct points"
+    return (
+        f"{prompt}\n\n"
+        f"For this image, the hCaptcha request accepts {limit}. "
+        "The limit applies to the current image only; do not return selections for other images."
+    )
+
+
+def _selection_retry_prompt(prompt: str, error: str) -> str:
+    return (
+        f"{prompt}\n\nYour previous answer violated the hCaptcha selection limit: {error}. "
+        "Re-evaluate this image and return a corrected answer within the stated limit."
+    )
+
+
 def _build_point_prompt(
     user_prompt: str,
     *,
@@ -837,6 +898,7 @@ def apply_hcaptcha_drag_patch() -> None:
                     )
 
                 normalized = uses_normalized_coordinates(self.config.SPATIAL_POINT_REASONER_MODEL)
+                minimum_points, maximum_points = _multiple_choice_point_limits(self.captcha_payload)
                 user_prompt = (
                     _normalized_point_prompt(base_prompt, raw, image_grid_bounds)
                     if normalized
@@ -846,39 +908,65 @@ def apply_hcaptcha_drag_patch() -> None:
                         clickable_bounds=clickable_bounds,
                     )
                 )
+                user_prompt = _selection_limit_prompt(
+                    user_prompt, minimum=minimum_points, maximum=maximum_points
+                )
                 if normalized:
                     user_prompt = _build_normalized_spatial_prompt(
                         user_prompt, captcha_payload=self.captcha_payload
                     )
-                response = await _request_spatial_response(
-                    self._spatial_point_reasoner,
-                    raw,
-                    projection,
-                    user_prompt,
-                    ImageAreaSelectChallenge,
-                    normalized=normalized,
-                )
-                logger.debug(f'[{cid+1}/{crumb_count}]ToolInvokeMessage: {response.log_message}')
-                self._spatial_point_reasoner.cache_response(
-                    path=cache_key.joinpath(f"{cache_key.name}_{cid}_model_answer.json")
-                )
-                points = (
-                    [to_page_point(point, challenge_bbox) for point in response.points]
-                    if normalized
-                    else response.points
-                )
-                points = unique_points(points)
-                current_bbox = await view.bounding_box()
-                if not same_bounds(challenge_bbox, current_bbox):
-                    raise ValueError("Challenge bounds changed while waiting for the model answer")
-                validation_error = _point_answer_validation_error(
-                    points, challenge_bbox=current_bbox, clickable_bounds=clickable_bounds
-                )
-                if validation_error is not None:
-                    logger.warning(
-                        "Rejected unsafe hCaptcha point answer | reason={}", validation_error
+                points = []
+                for answer_attempt in range(2):
+                    response = await _request_spatial_response(
+                        self._spatial_point_reasoner,
+                        raw,
+                        projection,
+                        user_prompt,
+                        ImageAreaSelectChallenge,
+                        normalized=normalized,
                     )
-                    raise ValueError(f"Unsafe hCaptcha point answer: {validation_error}")
+                    logger.debug(
+                        f'[{cid+1}/{crumb_count}]ToolInvokeMessage: {response.log_message}'
+                    )
+                    answer_suffix = f"_retry{answer_attempt}" if answer_attempt else ""
+                    self._spatial_point_reasoner.cache_response(
+                        path=cache_key.joinpath(
+                            f"{cache_key.name}_{cid}_model_answer{answer_suffix}.json"
+                        )
+                    )
+                    points = (
+                        [to_page_point(point, challenge_bbox) for point in response.points]
+                        if normalized
+                        else response.points
+                    )
+                    points = unique_points(points)
+                    current_bbox = await view.bounding_box()
+                    if not same_bounds(challenge_bbox, current_bbox):
+                        raise ValueError(
+                            "Challenge bounds changed while waiting for the model answer"
+                        )
+
+                    count_error = _selection_count_error(
+                        points, minimum=minimum_points, maximum=maximum_points
+                    )
+                    if count_error is not None:
+                        if answer_attempt == 0:
+                            logger.warning(
+                                "Reasking for hCaptcha point answer | reason={}", count_error
+                            )
+                            user_prompt = _selection_retry_prompt(user_prompt, count_error)
+                            continue
+                        raise ValueError(f"Invalid hCaptcha point selection count: {count_error}")
+
+                    validation_error = _point_answer_validation_error(
+                        points, challenge_bbox=current_bbox, clickable_bounds=clickable_bounds
+                    )
+                    if validation_error is not None:
+                        logger.warning(
+                            "Rejected unsafe hCaptcha point answer | reason={}", validation_error
+                        )
+                        raise ValueError(f"Unsafe hCaptcha point answer: {validation_error}")
+                    break
 
                 for point in points:
                     if not same_bounds(challenge_bbox, await view.bounding_box()):

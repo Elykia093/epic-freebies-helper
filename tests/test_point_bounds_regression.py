@@ -12,7 +12,6 @@ from hcaptcha_challenger.models import ImageAreaSelectChallenge, PointCoordinate
 
 from extensions import hcaptcha_adapter as adapter
 
-
 BBOX = {"x": 100, "y": 100, "width": 500, "height": 470}
 
 
@@ -29,24 +28,33 @@ def point_flow(monkeypatch):
     monkeypatch.setattr(adapter, "_apply_empty_checkcaptcha_patch", lambda: None)
     adapter.apply_hcaptcha_drag_patch()
 
-    def build(model, coordinates, *, count_layout=False):
+    def build(
+        model,
+        coordinates,
+        *,
+        count_layout=False,
+        prompt=None,
+        responses=None,
+        choice_limits=(None, None),
+    ):
         image = np.full((470, 500, 3), 245, dtype=np.uint8)
         image[:108] = (143, 131, 0)
         if count_layout:
             image[130:460, 10:490] = (80, 120, 160)
             for y in (165, 275, 385):
                 cv2.ellipse(image, (65, y), (29, 18), 0, 0, 360, (20, 20, 20), -1)
-            prompt = "Click the requested animal count"
+            default_prompt = "Click the requested animal count"
         else:
             image[130:460, 10:490] = 255
             image[220:460, 10:490] = (60, 130, 70)
             cv2.circle(image, (250, 170), 20, (0, 0, 220), -1)
-            prompt = "Click the red circle"
+            default_prompt = "Click the red circle"
+        prompt = prompt or default_prompt
         monkeypatch.setattr(adapter.cv2, "imread", lambda _path: image)
         answer = ImageAreaSelectChallenge(
             challenge_prompt=prompt, points=[PointCoordinate(x=coordinates[0], y=coordinates[1])]
         )
-        request = AsyncMock(return_value=answer)
+        request = AsyncMock(side_effect=responses or [answer])
         monkeypatch.setattr(adapter, "_request_spatial_response", request)
         view = SimpleNamespace(bounding_box=AsyncMock(return_value=dict(BBOX)))
         page = SimpleNamespace(
@@ -59,7 +67,13 @@ def point_flow(monkeypatch):
                 SPATIAL_POINT_REASONER_MODEL=model,
                 WAIT_FOR_CHALLENGE_VIEW_TO_RENDER_MS=0,
             ),
-            captcha_payload=SimpleNamespace(get_requester_question=lambda: prompt),
+            captcha_payload=SimpleNamespace(
+                get_requester_question=lambda: prompt,
+                request_config=SimpleNamespace(
+                    multiple_choice_min_choices=choice_limits[0],
+                    multiple_choice_max_choices=choice_limits[1],
+                ),
+            ),
             get_challenge_frame_locator=AsyncMock(
                 return_value=SimpleNamespace(locator=lambda _selector: view)
             ),
@@ -117,3 +131,28 @@ def test_known_count_layout_still_excludes_reference_strip(point_flow):
 
     flow.arm.page.mouse.click.assert_not_awaited()
     flow.arm.click_by_mouse.assert_not_awaited()
+
+
+def test_point_answer_is_reasked_when_it_exceeds_per_image_choice_limit(point_flow):
+    prompt = "Click on the TWO shortest towers"
+    responses = [
+        ImageAreaSelectChallenge(
+            challenge_prompt=prompt,
+            points=[PointCoordinate(x=200, y=200), PointCoordinate(x=800, y=800)],
+        ),
+        ImageAreaSelectChallenge(challenge_prompt=prompt, points=[PointCoordinate(x=500, y=500)]),
+    ]
+    flow = point_flow(
+        "Qwen/Qwen3-VL-32B-Instruct",
+        (500, 500),
+        prompt=prompt,
+        responses=responses,
+        choice_limits=(1, 1),
+    )
+
+    flow.run()
+
+    assert flow.request.await_count == 2
+    assert "exactly 1 distinct point" in flow.request.await_args_list[0].args[3]
+    assert "previous answer violated" in flow.request.await_args_list[1].args[3]
+    flow.arm.page.mouse.click.assert_awaited_once_with(350, 335, delay=180)
