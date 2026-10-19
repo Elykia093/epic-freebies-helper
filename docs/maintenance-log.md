@@ -1430,3 +1430,11 @@
 - 根因判断：运行产物显示模型有时少返回或多返回点，代码此前没有按题目显式目标数校验。第一次尝试把 `multiple_choice_max_choices` 当作每图点数上限，但 hcaptcha-challenger 0.19.0 的点选执行路径会点击模型返回的全部点，且该字段默认值与题面数量不总是一致；该假设已撤销。Epic 仍拒绝部分 solver 标记成功的答案，不能确认问题已解决。
 - 改动文件：`app/extensions/hcaptcha_adapter.py`、`tests/test_point_bounds_regression.py`、`docs/maintenance-log.md`。
 - 处理结果：改为从英文题面提取明确目标数，提示塔题按层数比较；点数不符时保留首答并最多重问一次，仍不符则不点击提交。仓库变量 `GLM_MAX_TOKENS` 从 `2048` 调至 `4096`。Ruff、Black、Python 语法和 `git diff --check` 通过；按仓库规则未运行测试。两次 Actions 运行均未确认成功领取，仍需针对验证码服务端拒绝和多选响应解析失败继续排查。
+
+
+### 2026-10-20 从原始 CAPTCHA 题面读取目标数量
+
+- 现象：提交 `b4fe29c` 的 Actions #39293042433 仍在登录阶段失败。日志没有点数重答记录；运行产物显示问句数量没有进入校验提示。Epic 仍对 solver 标记成功的挑战返回 `captcha_invalid`，另有 `image_label_multi_select` schema 解析失败。
+- 根因判断：数量校验读取了规范化用户提示，部分路径会省略原题里的数量词；改为读取 `CaptchaPayload.get_requester_question()`。第三次运行仍失败，说明原题数量遗漏不是唯一原因；模型点位准确性、Epic 对验证令牌的拒绝及多选 schema 兼容仍未完全确定。
+- 改动文件：`app/extensions/hcaptcha_adapter.py`、`tests/test_point_bounds_regression.py`、`docs/maintenance-log.md`。
+- 处理结果：增加从原始题面提取显式目标数的校验，并保留一次受限重答。Ruff、Black、Python 语法和 `git diff --check` 通过，按仓库规则未运行测试。Actions #39296343309 使用提交 `89a639d`，仍以 `captcha_invalid` 失败；未确认成功登录或领取。`GLM_MAX_TOKENS` 已设为 `4096`。
