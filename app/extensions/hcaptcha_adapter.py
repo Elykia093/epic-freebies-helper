@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import itertools
+import re
 from contextlib import suppress
 from math import ceil, floor, isfinite
 from pathlib import Path
@@ -189,64 +190,53 @@ def _point_inside_bounds(
     return x_min <= x <= x_max and y_min <= y <= y_max
 
 
-def _multiple_choice_point_limits(captcha_payload: Any) -> tuple[int | None, int | None]:
-    request_config = getattr(captcha_payload, "request_config", None)
-    if request_config is None:
-        return None, None
-
-    def read_limit(name: str) -> int | None:
-        value = (
-            request_config.get(name)
-            if isinstance(request_config, dict)
-            else getattr(request_config, name, None)
-        )
-        if value is None:
-            return None
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            return None
-        return value
-
-    minimum = read_limit("multiple_choice_min_choices")
-    maximum = read_limit("multiple_choice_max_choices")
-    if minimum is not None and maximum is not None and minimum > maximum:
-        return None, None
-    return minimum, maximum
+_EXPLICIT_POINT_COUNT = re.compile(
+    r"\b(?:each of (?:the )?|the )?(?P<count>one|two|three|four|five|six|[1-6])\s+"
+    r"(?:(?:shortest|tallest|smallest|largest|lowest|highest)\s+)?"
+    r"(?:lines?|gaps?|towers?|shapes?|objects?|targets?|items?|circles?)\b",
+    re.IGNORECASE,
+)
+_POINT_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
 
 
-def _selection_count_error(
-    points: list[Any], *, minimum: int | None, maximum: int | None
-) -> str | None:
-    count = len(points)
-    if minimum is not None and count < minimum:
-        return f"answer has {count} points; this image requires at least {minimum}"
-    if maximum is not None and count > maximum:
-        return f"answer has {count} points; this image allows at most {maximum}"
-    return None
+def _explicit_point_count(question: str) -> int | None:
+    match = _EXPLICIT_POINT_COUNT.search(question)
+    if match is None:
+        return None
+    value = match.group("count").lower()
+    return int(value) if value.isdigit() else _POINT_COUNT_WORDS[value]
 
 
-def _selection_limit_prompt(prompt: str, *, minimum: int | None, maximum: int | None) -> str:
-    if minimum is None and maximum is None:
+def _selection_count_error(points: list[Any], *, expected: int | None) -> str | None:
+    if expected is None or len(points) == expected:
+        return None
+    actual_word = "point" if len(points) == 1 else "points"
+    expected_word = "point" if expected == 1 else "points"
+    return f"model returned {len(points)} {actual_word}; prompt requires {expected} {expected_word}"
+
+
+def _selection_count_prompt(prompt: str, *, expected: int | None) -> str:
+    if expected is None:
         return prompt
-    if minimum is not None and minimum == maximum:
-        point_word = "point" if minimum == 1 else "points"
-        limit = f"exactly {minimum} distinct {point_word}"
-    elif minimum is not None and maximum is not None:
-        limit = f"between {minimum} and {maximum} distinct points"
-    elif minimum is not None:
-        limit = f"at least {minimum} distinct points"
-    else:
-        limit = f"at most {maximum} distinct points"
-    return (
-        f"{prompt}\n\n"
-        f"For this image, the hCaptcha request accepts {limit}. "
-        "The limit applies to the current image only; do not return selections for other images."
+    point_word = "point" if expected == 1 else "points"
+    instruction = (
+        f"Return exactly {expected} distinct click {point_word} for this image. "
+        "This count applies to the current image, not across all challenge images."
     )
+    if re.search(r"\b(shortest|tallest)\s+towers?\b", prompt, re.IGNORECASE):
+        instruction += (
+            " Count the visible stacked layers in each tower, rank towers by layer count, "
+            "and click the center of each requested tower."
+        )
+    if re.search(r"\bgap\b.*\blines?\b|\blines?\b.*\bgap\b", prompt, re.IGNORECASE):
+        instruction += " Return one point at the center of each requested line gap."
+    return f"{prompt}\n\n{instruction}"
 
 
 def _selection_retry_prompt(prompt: str, error: str) -> str:
     return (
-        f"{prompt}\n\nYour previous answer violated the hCaptcha selection limit: {error}. "
-        "Re-evaluate this image and return a corrected answer within the stated limit."
+        f"{prompt}\n\nYour previous answer was incomplete or included extra targets ({error}). "
+        "Re-evaluate this image and return the exact number of distinct points requested."
     )
 
 
@@ -898,7 +888,7 @@ def apply_hcaptcha_drag_patch() -> None:
                     )
 
                 normalized = uses_normalized_coordinates(self.config.SPATIAL_POINT_REASONER_MODEL)
-                minimum_points, maximum_points = _multiple_choice_point_limits(self.captcha_payload)
+                expected_points = _explicit_point_count(base_prompt)
                 user_prompt = (
                     _normalized_point_prompt(base_prompt, raw, image_grid_bounds)
                     if normalized
@@ -908,9 +898,7 @@ def apply_hcaptcha_drag_patch() -> None:
                         clickable_bounds=clickable_bounds,
                     )
                 )
-                user_prompt = _selection_limit_prompt(
-                    user_prompt, minimum=minimum_points, maximum=maximum_points
-                )
+                user_prompt = _selection_count_prompt(user_prompt, expected=expected_points)
                 if normalized:
                     user_prompt = _build_normalized_spatial_prompt(
                         user_prompt, captcha_payload=self.captcha_payload
@@ -946,9 +934,7 @@ def apply_hcaptcha_drag_patch() -> None:
                             "Challenge bounds changed while waiting for the model answer"
                         )
 
-                    count_error = _selection_count_error(
-                        points, minimum=minimum_points, maximum=maximum_points
-                    )
+                    count_error = _selection_count_error(points, expected=expected_points)
                     if count_error is not None:
                         if answer_attempt == 0:
                             logger.warning(

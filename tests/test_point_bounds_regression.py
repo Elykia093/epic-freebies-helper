@@ -28,15 +28,7 @@ def point_flow(monkeypatch):
     monkeypatch.setattr(adapter, "_apply_empty_checkcaptcha_patch", lambda: None)
     adapter.apply_hcaptcha_drag_patch()
 
-    def build(
-        model,
-        coordinates,
-        *,
-        count_layout=False,
-        prompt=None,
-        responses=None,
-        choice_limits=(None, None),
-    ):
+    def build(model, coordinates, *, count_layout=False, prompt=None, responses=None):
         image = np.full((470, 500, 3), 245, dtype=np.uint8)
         image[:108] = (143, 131, 0)
         if count_layout:
@@ -67,13 +59,7 @@ def point_flow(monkeypatch):
                 SPATIAL_POINT_REASONER_MODEL=model,
                 WAIT_FOR_CHALLENGE_VIEW_TO_RENDER_MS=0,
             ),
-            captcha_payload=SimpleNamespace(
-                get_requester_question=lambda: prompt,
-                request_config=SimpleNamespace(
-                    multiple_choice_min_choices=choice_limits[0],
-                    multiple_choice_max_choices=choice_limits[1],
-                ),
-            ),
+            captcha_payload=SimpleNamespace(get_requester_question=lambda: prompt),
             get_challenge_frame_locator=AsyncMock(
                 return_value=SimpleNamespace(locator=lambda _selector: view)
             ),
@@ -133,26 +119,24 @@ def test_known_count_layout_still_excludes_reference_strip(point_flow):
     flow.arm.click_by_mouse.assert_not_awaited()
 
 
-def test_point_answer_is_reasked_when_it_exceeds_per_image_choice_limit(point_flow):
-    prompt = "Click on the TWO shortest towers"
+def test_point_answer_is_reasked_when_it_omits_an_explicit_target(point_flow):
+    prompt = "Please click on the gap on each of the two lines"
     responses = [
+        ImageAreaSelectChallenge(challenge_prompt=prompt, points=[PointCoordinate(x=500, y=500)]),
         ImageAreaSelectChallenge(
             challenge_prompt=prompt,
-            points=[PointCoordinate(x=200, y=200), PointCoordinate(x=800, y=800)],
+            points=[PointCoordinate(x=400, y=500), PointCoordinate(x=600, y=500)],
         ),
-        ImageAreaSelectChallenge(challenge_prompt=prompt, points=[PointCoordinate(x=500, y=500)]),
     ]
-    flow = point_flow(
-        "Qwen/Qwen3-VL-32B-Instruct",
-        (500, 500),
-        prompt=prompt,
-        responses=responses,
-        choice_limits=(1, 1),
-    )
+    flow = point_flow("Qwen/Qwen3-VL-32B-Instruct", (500, 500), prompt=prompt, responses=responses)
 
     flow.run()
 
     assert flow.request.await_count == 2
-    assert "exactly 1 distinct point" in flow.request.await_args_list[0].args[3]
-    assert "previous answer violated" in flow.request.await_args_list[1].args[3]
-    flow.arm.page.mouse.click.assert_awaited_once_with(350, 335, delay=180)
+    assert adapter._explicit_point_count("Click on the TWO shortest towers") == 2
+    assert "exactly 2 distinct click points" in flow.request.await_args_list[0].args[3]
+    assert "previous answer was incomplete" in flow.request.await_args_list[1].args[3]
+    assert [call.args[:2] for call in flow.arm.page.mouse.click.await_args_list] == [
+        (300, 335),
+        (400, 335),
+    ]
