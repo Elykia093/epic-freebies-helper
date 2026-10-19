@@ -28,7 +28,9 @@ def point_flow(monkeypatch):
     monkeypatch.setattr(adapter, "_apply_empty_checkcaptcha_patch", lambda: None)
     adapter.apply_hcaptcha_drag_patch()
 
-    def build(model, coordinates, *, count_layout=False, prompt=None, responses=None):
+    def build(
+        model, coordinates, *, count_layout=False, prompt=None, source_question=None, responses=None
+    ):
         image = np.full((470, 500, 3), 245, dtype=np.uint8)
         image[:108] = (143, 131, 0)
         if count_layout:
@@ -59,7 +61,9 @@ def point_flow(monkeypatch):
                 SPATIAL_POINT_REASONER_MODEL=model,
                 WAIT_FOR_CHALLENGE_VIEW_TO_RENDER_MS=0,
             ),
-            captcha_payload=SimpleNamespace(get_requester_question=lambda: prompt),
+            captcha_payload=SimpleNamespace(
+                get_requester_question=lambda: source_question or prompt
+            ),
             get_challenge_frame_locator=AsyncMock(
                 return_value=SimpleNamespace(locator=lambda _selector: view)
             ),
@@ -120,7 +124,8 @@ def test_known_count_layout_still_excludes_reference_strip(point_flow):
 
 
 def test_point_answer_is_reasked_when_it_omits_an_explicit_target(point_flow):
-    prompt = "Please click on the gap on each of the two lines"
+    prompt = "Select the targets"
+    source_question = "Please click on the gap on each of the two lines"
     responses = [
         ImageAreaSelectChallenge(challenge_prompt=prompt, points=[PointCoordinate(x=500, y=500)]),
         ImageAreaSelectChallenge(
@@ -128,12 +133,19 @@ def test_point_answer_is_reasked_when_it_omits_an_explicit_target(point_flow):
             points=[PointCoordinate(x=400, y=500), PointCoordinate(x=600, y=500)],
         ),
     ]
-    flow = point_flow("Qwen/Qwen3-VL-32B-Instruct", (500, 500), prompt=prompt, responses=responses)
+    flow = point_flow(
+        "Qwen/Qwen3-VL-32B-Instruct",
+        (500, 500),
+        prompt=prompt,
+        source_question=source_question,
+        responses=responses,
+    )
 
     flow.run()
 
     assert flow.request.await_count == 2
     assert adapter._explicit_point_count("Click on the TWO shortest towers") == 2
+    assert "gap on each of the two lines" in flow.request.await_args_list[0].args[3]
     assert "exactly 2 distinct click points" in flow.request.await_args_list[0].args[3]
     assert "previous answer was incomplete" in flow.request.await_args_list[1].args[3]
     assert [call.args[:2] for call in flow.arm.page.mouse.click.await_args_list] == [

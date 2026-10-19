@@ -207,6 +207,14 @@ def _explicit_point_count(question: str) -> int | None:
     return int(value) if value.isdigit() else _POINT_COUNT_WORDS[value]
 
 
+def _requester_question(captcha_payload: Any, fallback: str) -> str:
+    with suppress(Exception):
+        question = captcha_payload.get_requester_question()
+        if isinstance(question, str) and question.strip():
+            return question
+    return fallback
+
+
 def _selection_count_error(points: list[Any], *, expected: int | None) -> str | None:
     if expected is None or len(points) == expected:
         return None
@@ -215,7 +223,7 @@ def _selection_count_error(points: list[Any], *, expected: int | None) -> str | 
     return f"model returned {len(points)} {actual_word}; prompt requires {expected} {expected_word}"
 
 
-def _selection_count_prompt(prompt: str, *, expected: int | None) -> str:
+def _selection_count_prompt(prompt: str, *, expected: int | None, question: str) -> str:
     if expected is None:
         return prompt
     point_word = "point" if expected == 1 else "points"
@@ -223,12 +231,13 @@ def _selection_count_prompt(prompt: str, *, expected: int | None) -> str:
         f"Return exactly {expected} distinct click {point_word} for this image. "
         "This count applies to the current image, not across all challenge images."
     )
-    if re.search(r"\b(shortest|tallest)\s+towers?\b", prompt, re.IGNORECASE):
+    task_text = f"{question}\n{prompt}"
+    if re.search(r"\b(shortest|tallest)\s+towers?\b", task_text, re.IGNORECASE):
         instruction += (
             " Count the visible stacked layers in each tower, rank towers by layer count, "
             "and click the center of each requested tower."
         )
-    if re.search(r"\bgap\b.*\blines?\b|\blines?\b.*\bgap\b", prompt, re.IGNORECASE):
+    if re.search(r"\bgap\b.*\blines?\b|\blines?\b.*\bgap\b", task_text, re.IGNORECASE):
         instruction += " Return one point at the center of each requested line gap."
     return f"{prompt}\n\n{instruction}"
 
@@ -888,7 +897,8 @@ def apply_hcaptcha_drag_patch() -> None:
                     )
 
                 normalized = uses_normalized_coordinates(self.config.SPATIAL_POINT_REASONER_MODEL)
-                expected_points = _explicit_point_count(base_prompt)
+                question_for_count = _requester_question(self.captcha_payload, base_prompt)
+                expected_points = _explicit_point_count(question_for_count)
                 user_prompt = (
                     _normalized_point_prompt(base_prompt, raw, image_grid_bounds)
                     if normalized
@@ -898,7 +908,9 @@ def apply_hcaptcha_drag_patch() -> None:
                         clickable_bounds=clickable_bounds,
                     )
                 )
-                user_prompt = _selection_count_prompt(user_prompt, expected=expected_points)
+                user_prompt = _selection_count_prompt(
+                    user_prompt, expected=expected_points, question=question_for_count
+                )
                 if normalized:
                     user_prompt = _build_normalized_spatial_prompt(
                         user_prompt, captcha_payload=self.captcha_payload
