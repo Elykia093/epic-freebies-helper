@@ -1422,3 +1422,11 @@
 - 根因与处理：仅对明确的 JSON Mode 能力拒绝补发一次请求，保留结构校验；为 Qwen3-VL 使用单图归一化坐标并校验页面边界；通用点选不使用颜色启发式作为硬限制；不可恢复的请求仍穿透第三方重试并在浏览器清理后转换异常，仅共享鉴权/端点配置错误停止整个批次；锁定并校验配对 Camoufox，经过官方 Sign in 衔接后等待商店登录状态。
 - 改动文件：`app/extensions/{llm_adapter,llm_errors,spatial_coordinates,hcaptcha_adapter}.py`、浏览器/认证/领取服务、部署与调度入口、设置、依赖锁、Actions、配置文档及相关回归测试。
 - 验证：白底目标误拒绝和图片错误影响后续账号均先复现失败，修复后对应回归通过；完整离线验证为 `137 passed, 2 skipped`，两项真实浏览器冒烟默认跳过。此前使用 Qwen3-VL-32B-Instruct 的 Actions #59 完成登录并确认两款游戏已在库，不能将其等同于本次新提交的云端验证。Qwen3.5-122B 的独立测试未通过，未纳入当前兼容性保证。
+
+
+### 2026-10-20 校验 hCaptcha 点选答案数量
+
+- 现象：Actions #39287408887 和 #39293042433 均通过依赖与浏览器准备，但登录验证码后 Epic 返回 `captcha_invalid`；失败样本还出现 `image_label_multi_select` 响应未通过 schema 校验。
+- 根因判断：运行产物显示模型有时少返回或多返回点，代码此前没有按题目显式目标数校验。第一次尝试把 `multiple_choice_max_choices` 当作每图点数上限，但 hcaptcha-challenger 0.19.0 的点选执行路径会点击模型返回的全部点，且该字段默认值与题面数量不总是一致；该假设已撤销。Epic 仍拒绝部分 solver 标记成功的答案，不能确认问题已解决。
+- 改动文件：`app/extensions/hcaptcha_adapter.py`、`tests/test_point_bounds_regression.py`、`docs/maintenance-log.md`。
+- 处理结果：改为从英文题面提取明确目标数，提示塔题按层数比较；点数不符时保留首答并最多重问一次，仍不符则不点击提交。仓库变量 `GLM_MAX_TOKENS` 从 `2048` 调至 `4096`。Ruff、Black、Python 语法和 `git diff --check` 通过；按仓库规则未运行测试。两次 Actions 运行均未确认成功领取，仍需针对验证码服务端拒绝和多选响应解析失败继续排查。
