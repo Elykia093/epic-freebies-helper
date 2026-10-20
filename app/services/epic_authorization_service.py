@@ -101,6 +101,7 @@ class EpicAuthorization:
         self._last_captcha_totp_refresh_at = 0.0
         self._captcha_solve_attempts = 0
         self._captcha_rejection_retries = 0
+        self._email_step_completed = False
 
     async def _wait_for_login_challenge(
         self, agent: AgentV, *, context: str, timeout_seconds: float
@@ -599,6 +600,17 @@ class EpicAuthorization:
                     raise RuntimeError(error_code)
 
                 if (
+                    endpoint == "email"
+                    and error_code == "errors.com.epicgames.accountportal.captcha_invalid"
+                    and self._email_step_completed
+                ):
+                    logger.warning(
+                        "Ignoring delayed email captcha rejection after the password form "
+                        "became visible"
+                    )
+                    continue
+
+                if (
                     endpoint == "login"
                     and error_code == "errors.com.epicgames.accountportal.captcha_invalid"
                 ):
@@ -901,6 +913,7 @@ class EpicAuthorization:
     async def _login(self) -> bool | None:
         self._captcha_solve_attempts = 0
         self._captcha_rejection_retries = 0
+        self._email_step_completed = False
         # 尽可能早地初始化机器人
         agent = AgentV(page=self.page, agent_config=settings)
 
@@ -926,6 +939,7 @@ class EpicAuthorization:
             # 3. 输入密码
             password_input = self.page.locator("#password")
             await expect(password_input).to_be_visible(timeout=10000)
+            self._email_step_completed = True
             await password_input.fill(settings.EPIC_PASSWORD.get_secret_value())
 
             # 4. 点击登录按钮，触发人机挑战值守监听器

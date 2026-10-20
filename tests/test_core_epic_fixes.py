@@ -326,6 +326,29 @@ def test_email_captcha_rejection_preempts_another_solve(auth_module, monkeypatch
     solver.assert_not_awaited()
 
 
+def test_delayed_email_captcha_rejection_is_ignored_after_password_step(auth_module):
+    auth = auth_module.EpicAuthorization(SimpleNamespace(url="https://www.epicgames.com/id/login"))
+    auth._email_step_completed = True
+    auth._is_login_success_signal.put_nowait({"authenticated": True})
+    response = SimpleNamespace(
+        url="https://www.epicgames.com/id/api/email",
+        status=400,
+        request=SimpleNamespace(method="POST"),
+        json=AsyncMock(
+            return_value={"errorCode": "errors.com.epicgames.accountportal.captcha_invalid"}
+        ),
+    )
+
+    async def run():
+        await auth._on_response_anything(response)
+        await auth._await_login_outcome(auth.page.url, object())
+
+    asyncio.run(run())
+
+    assert auth._login_error_signal.empty()
+    assert auth._email_step_completed
+
+
 def test_login_captcha_rejection_retries_current_session(auth_module):
     auth = auth_module.EpicAuthorization(SimpleNamespace(url="https://www.epicgames.com/id/login"))
     response = SimpleNamespace(

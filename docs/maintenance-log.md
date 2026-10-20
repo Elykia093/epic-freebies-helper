@@ -1462,3 +1462,11 @@
 - 根因判断：点选提示重复了原题但没有明确分类边界；图块拼贴背景容易让视觉模型把场景线索误当物体属性。此前失败运行中出现的请求超时和结构化解析错误仍是独立风险。
 - 改动文件：`app/extensions/hcaptcha_adapter.py`、`tests/test_point_bounds_regression.py`、`docs/maintenance-log.md`。
 - 处理结果：对人造物题增加只判断物体本身、排除植物/蔬菜/松果/动物/昆虫及装饰背景的指令；新增提示回归断言。尚未运行测试或新 Actions，结果需由云端登录链路复验。
+
+
+### 2026-10-20 区分邮箱步骤与登录步骤的 CAPTCHA 响应
+
+- 现象：Actions #39435227350 的运行日志显示，hCaptcha 成功后 Epic 返回的是 `/id/api/email` 的 `captcha_invalid`，认证仍在 `_await_login_outcome` 中终止；邮箱步骤之后密码表单已实际出现。
+- 根因判断：邮箱与登录错误共用同一队列，延迟到达的邮箱拒绝在密码步骤后仍被当作当前登录错误。动作本身尚未证明邮箱验证码已被当前重试成功替换，因此只在密码表单可见后忽略该迟到事件。
+- 改动文件：`app/services/epic_authorization_service.py`、`tests/test_core_epic_fixes.py`、`docs/maintenance-log.md`。
+- 处理结果：记录邮箱步骤完成状态；只忽略密码表单出现之后到达的邮箱 `captcha_invalid`，在密码表单之前仍按失败处理。新增阶段边界回归用例；按仓库规则未执行测试，需通过新的 Actions 实际复核。
