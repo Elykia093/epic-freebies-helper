@@ -1478,3 +1478,16 @@
 - 根因判断：同一运行多次出现 GLM/Qwen 请求 90 秒 ReadTimeout、结构化输出解析失败及验证码挑战视图超时。当前证据不足以把剩余失败归因到单一代码缺陷；SiliconFlow 接口基础兼容性此前已通过独立文本、有效图片和 JSON 请求核验。
 - 改动文件：`app/services/epic_authorization_service.py`、`app/extensions/hcaptcha_adapter.py`、`tests/test_core_epic_fixes.py`、`tests/test_point_bounds_regression.py`、`docs/maintenance-log.md`。
 - 处理结果：邮箱阶段状态修复在云端日志中实际触发；人造物题提示也已部署，但本次运行没有完成登录。AST、Ruff、Black 与 `git diff --check` 通过；按仓库规则未执行测试。不得将该运行报告为领取成功。
+
+
+### 2026-10-21 本地验证 CAPTCHA 与认证等待路径
+
+- 现象：Actions #39441941930 在忽略邮箱 CAPTCHA 拒绝后仍未完成登录；其中一轮模型答案已返回，但读取验证码区域时定位超时。用户明确允许本轮本地测试，并要求提交、推送后再用 Actions 验证。
+- 根因判断：不能将所有失败归因于模型服务超时。当前状态机允许在忽略邮箱错误、没有后续成功或挑战信号时继续等待至截止点；验证码区域也可能在模型返回前消失。离线复现只能证明这些执行路径存在，尚不能证明历史邮箱错误是否属于旧请求，或验证码区域消失的实际原因。
+- 改动文件：`docs/maintenance-log.md`；本条只记录验证结果，未修改运行代码或工作流。
+- 验证环境：修复分支 `codex/retry-epic-captcha-rejection`，被测提交 `31e0b59`，Windows、Python 3.12.13、Playwright 1.53.0；局部 DOM 验证使用配套 Firefox 139.0（build 1488）。云端 Ubuntu/Camoufox 及真实 Epic/Qwen 链路仍需单独验证。
+- 处理结果：
+  - 执行 `python -m pytest -q -p no:cacheprovider --tb=short tests/test_core_epic_fixes.py tests/test_point_bounds_regression.py tests/test_glm_adapter.py tests/test_hcaptcha_adapter.py`，结果 `70 passed in 11.18s`，没有跳过用例。模型和页面外部交互由离线 fake 隔离。
+  - 使用当前源码的真实认证类执行四个定向离线场景：邮箱阶段未完成时拒绝立即失败；密码阶段已完成且有成功信号时正常返回；没有后续进展时在等待期限结束后超时；解题耗时 90 秒后收到邮箱拒绝、无后续进展时，在总计 180 秒处超时，拒绝后再等待 89.5 秒。最后一种场景在 outcome 等待期间没有调用表单或导航恢复动作；不等同于完整登录流程的端到端验证。
+  - 使用真实 Firefox、本地合成 DOM 和固定模型答案验证点选路径；点击与提交通道用 fake 隔离。区域保持可见时正常调度动作；区域在模型返回前被移除时，真实定位器触发超时且未调度点击或提交。局部定位超时缩短为 400 毫秒，没有连接 Epic 或调用模型服务。
+  - 本地通过不代表真实登录或领取成功；本次提交后按用户要求触发修复分支 Actions，结果另行追加记录。
