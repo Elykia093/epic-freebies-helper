@@ -1470,3 +1470,11 @@
 - 根因判断：邮箱与登录错误共用同一队列，延迟到达的邮箱拒绝在密码步骤后仍被当作当前登录错误。动作本身尚未证明邮箱验证码已被当前重试成功替换，因此只在密码表单可见后忽略该迟到事件。
 - 改动文件：`app/services/epic_authorization_service.py`、`tests/test_core_epic_fixes.py`、`docs/maintenance-log.md`。
 - 处理结果：记录邮箱步骤完成状态；只忽略密码表单出现之后到达的邮箱 `captcha_invalid`，在密码表单之前仍按失败处理。新增阶段边界回归用例；按仓库规则未执行测试，需通过新的 Actions 实际复核。
+
+
+### 2026-10-20 复验邮箱 CAPTCHA 阶段处理
+
+- 现象：Actions #39441941930 日志确认迟到的 `/id/api/email` `captcha_invalid` 已在密码表单出现后忽略，但整次运行仍在认证 outcome 超时，未确认登录或领取。
+- 根因判断：同一运行多次出现 GLM/Qwen 请求 90 秒 ReadTimeout、结构化输出解析失败及验证码挑战视图超时。当前证据不足以把剩余失败归因到单一代码缺陷；SiliconFlow 接口基础兼容性此前已通过独立文本、有效图片和 JSON 请求核验。
+- 改动文件：`app/services/epic_authorization_service.py`、`app/extensions/hcaptcha_adapter.py`、`tests/test_core_epic_fixes.py`、`tests/test_point_bounds_regression.py`、`docs/maintenance-log.md`。
+- 处理结果：邮箱阶段状态修复在云端日志中实际触发；人造物题提示也已部署，但本次运行没有完成登录。AST、Ruff、Black 与 `git diff --check` 通过；按仓库规则未执行测试。不得将该运行报告为领取成功。
