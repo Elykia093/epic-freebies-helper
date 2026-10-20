@@ -1438,3 +1438,11 @@
 - 根因判断：数量校验读取了规范化用户提示，部分路径会省略原题里的数量词；改为读取 `CaptchaPayload.get_requester_question()`。第三次运行仍失败，说明原题数量遗漏不是唯一原因；模型点位准确性、Epic 对验证令牌的拒绝及多选 schema 兼容仍未完全确定。
 - 改动文件：`app/extensions/hcaptcha_adapter.py`、`tests/test_point_bounds_regression.py`、`docs/maintenance-log.md`。
 - 处理结果：增加从原始题面提取显式目标数的校验，并保留一次受限重答。Ruff、Black、Python 语法和 `git diff --check` 通过，按仓库规则未运行测试。Actions #39296343309 使用提交 `89a639d`，仍以 `captcha_invalid` 失败；未确认成功登录或领取。`GLM_MAX_TOKENS` 已设为 `4096`。
+
+
+### 2026-10-20 恢复 Epic 拒绝验证码后的登录提交
+
+- 现象：Actions #39296343309 中，Qwen 挑战响应完成且 hCaptcha 本地返回成功后，Epic `/id/api/login` 仍多次返回 `captcha_invalid`；认证状态机立即中止当前登录轮次。历史 Actions #59 也出现多次 hCaptcha 失败后才最终进入商店。
+- 根因判断：SiliconFlow Qwen3-VL 文本、有效图片和 JSON 请求均已单独验证可用；失败产物中的点选坐标符合可见目标。当前证据不支持模型接口不兼容，能确认的代码缺口是登录端点明确拒绝验证码后没有在当前会话内重提表单。服务端为何拒绝该次 token 仍无法仅凭现有日志确定。
+- 改动文件：`app/services/epic_authorization_service.py`、`tests/test_core_epic_fixes.py`、`docs/maintenance-log.md`。
+- 处理结果：为认证错误记录端点来源；只对 `/id/api/login` 的 `captcha_invalid` 增加最多三次同会话恢复，尝试重提密码表单或继续处理当前可见挑战。邮箱端点和其他认证错误保持原行为。新增定向回归用例；按仓库规则未执行测试，需通过推送后的 Actions 验证实际 Epic 登录链路。

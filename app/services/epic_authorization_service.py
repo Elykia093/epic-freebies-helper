@@ -100,6 +100,7 @@ class EpicAuthorization:
         self._invalid_totp_rejections = 0
         self._last_captcha_totp_refresh_at = 0.0
         self._captcha_solve_attempts = 0
+        self._captcha_rejection_retries = 0
 
     async def _wait_for_login_challenge(
         self, agent: AgentV, *, context: str, timeout_seconds: float
@@ -153,7 +154,7 @@ class EpicAuthorization:
                 or not re.fullmatch(r"errors\.com\.[A-Za-z0-9_]+(?:[.-][A-Za-z0-9_]+)*", error_code)
             ):
                 error_code = "unknown_error"
-            self._login_error_signal.put_nowait({"errorCode": error_code})
+            self._login_error_signal.put_nowait({"endpoint": endpoint, "errorCode": error_code})
         elif endpoint == "analytics" and result.get("accountId"):
             self._is_login_success_signal.put_nowait({"authenticated": True})
         elif refresh_csrf and result.get("success") is True:
@@ -580,6 +581,7 @@ class EpicAuthorization:
             if not self._login_error_signal.empty():
                 result = await self._login_error_signal.get()
                 error_code = result.get("errorCode", "unknown_error")
+                endpoint = result.get("endpoint")
 
                 if error_code == "errors.com.epicgames.accountportal.csrf_token_invalid":
                     logger.warning(
@@ -590,6 +592,27 @@ class EpicAuthorization:
                     await self.page.goto(point_url, wait_until="domcontentloaded")
                     await self._wait_for_login_form(point_url)
                     raise RuntimeError(error_code)
+
+                if (
+                    endpoint == "login"
+                    and error_code == "errors.com.epicgames.accountportal.captcha_invalid"
+                ):
+                    if self._captcha_rejection_retries >= LOGIN_CAPTCHA_ATTEMPT_LIMIT:
+                        raise RuntimeError(error_code)
+
+                    self._captcha_rejection_retries += 1
+                    resubmitted = await self._resubmit_password_form()
+                    if not resubmitted and not await self._has_active_hcaptcha_challenge():
+                        raise RuntimeError(error_code)
+
+                    logger.warning(
+                        "Epic rejected the login captcha response; retrying the current login "
+                        "session ({}/{})",
+                        self._captcha_rejection_retries,
+                        LOGIN_CAPTCHA_ATTEMPT_LIMIT,
+                    )
+                    extend_deadline("captcha-rejected", 120)
+                    continue
 
                 if self._is_two_factor_required_error(error_code):
                     await submit_fresh_totp("two_factor_required")
@@ -864,6 +887,7 @@ class EpicAuthorization:
 
     async def _login(self) -> bool | None:
         self._captcha_solve_attempts = 0
+        self._captcha_rejection_retries = 0
         # 尽可能早地初始化机器人
         agent = AgentV(page=self.page, agent_config=settings)
 
