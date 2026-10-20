@@ -1446,3 +1446,19 @@
 - 根因判断：SiliconFlow Qwen3-VL 文本、有效图片和 JSON 请求均已单独验证可用；失败产物中的点选坐标符合可见目标。当前证据不支持模型接口不兼容，能确认的代码缺口是登录端点明确拒绝验证码后没有在当前会话内重提表单。服务端为何拒绝该次 token 仍无法仅凭现有日志确定。
 - 改动文件：`app/services/epic_authorization_service.py`、`tests/test_core_epic_fixes.py`、`docs/maintenance-log.md`。
 - 处理结果：为认证错误记录端点来源；只对 `/id/api/login` 的 `captcha_invalid` 增加最多三次同会话恢复，尝试重提密码表单或继续处理当前可见挑战。邮箱端点和其他认证错误保持原行为。新增定向回归用例；按仓库规则未执行测试，需通过推送后的 Actions 验证实际 Epic 登录链路。
+
+
+### 2026-10-20 延长验证码拒绝后的登录表单恢复等待
+
+- 现象：Actions #39425632994 的两个 hCaptcha 成功信号后约半秒，Epic 都返回 `captcha_invalid`；修复分支没有记录同会话重试，表明恢复表单在首次等待窗口内不可用。运行还出现 LLM schema 解析、90 秒请求超时和挑战视图超时。
+- 根因判断：验证码响应到达时登录表单可能尚在重绘，旧的 1 秒控件等待会让恢复直接退出。请求端点此前没有写入诊断日志，尚未排除拒绝来自 email 步骤；本次增加只记录端点名的日志以补足证据。
+- 改动文件：`app/services/epic_authorization_service.py`、`tests/test_core_epic_fixes.py`、`docs/maintenance-log.md`。
+- 处理结果：登录端点的受限恢复现在最多等待 5 秒获取密码表单；表单不可用时记录 URL 路径并保留原失败行为。Ruff、Black、Python 语法与 diff 检查需在本次提交后复核；按仓库规则未执行测试。
+
+
+### 2026-10-20 加强人造物品点选题提示
+
+- 现象：Actions #39425632994 的运行产物显示，Qwen 在“Tap on all things that people made”任务里把松果、蔬菜等自然物当作人造物，造成同一 challenge 的多个图片选择不一致。
+- 根因判断：点选提示重复了原题但没有明确分类边界；图块拼贴背景容易让视觉模型把场景线索误当物体属性。此前失败运行中出现的请求超时和结构化解析错误仍是独立风险。
+- 改动文件：`app/extensions/hcaptcha_adapter.py`、`tests/test_point_bounds_regression.py`、`docs/maintenance-log.md`。
+- 处理结果：对人造物题增加只判断物体本身、排除植物/蔬菜/松果/动物/昆虫及装饰背景的指令；新增提示回归断言。尚未运行测试或新 Actions，结果需由云端登录链路复验。

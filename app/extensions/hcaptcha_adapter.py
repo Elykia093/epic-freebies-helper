@@ -224,22 +224,34 @@ def _selection_count_error(points: list[Any], *, expected: int | None) -> str | 
 
 
 def _selection_count_prompt(prompt: str, *, expected: int | None, question: str) -> str:
-    if expected is None:
-        return prompt
-    point_word = "point" if expected == 1 else "points"
-    instruction = (
-        f"Return exactly {expected} distinct click {point_word} for this image. "
-        "This count applies to the current image, not across all challenge images."
-    )
     task_text = f"{question}\n{prompt}"
+    instructions = []
+    if expected is not None:
+        point_word = "point" if expected == 1 else "points"
+        instructions.append(
+            f"Return exactly {expected} distinct click {point_word} for this image. "
+            "This count applies to the current image, not across all challenge images."
+        )
+    if re.search(
+        r"\b(?:people made|created by humans|made by humans|man[ -]?made|human[ -]?made)\b",
+        task_text,
+        re.IGNORECASE,
+    ):
+        instructions.append(
+            "Select only objects manufactured by people. Exclude naturally occurring items "
+            "such as plants, vegetables, pine cones, animals, and insects, even when shown "
+            "on decorative tiles. Judge each object itself, not its tile or collage background."
+        )
     if re.search(r"\b(shortest|tallest)\s+towers?\b", task_text, re.IGNORECASE):
-        instruction += (
+        instructions.append(
             " Count the visible stacked layers in each tower, rank towers by layer count, "
             "and click the center of each requested tower."
         )
     if re.search(r"\bgap\b.*\blines?\b|\blines?\b.*\bgap\b", task_text, re.IGNORECASE):
-        instruction += " Return one point at the center of each requested line gap."
-    return f"{prompt}\n\n{instruction}"
+        instructions.append("Return one point at the center of each requested line gap.")
+    if not instructions:
+        return prompt
+    return f"{prompt}\n\n{' '.join(instructions)}"
 
 
 def _selection_retry_prompt(prompt: str, error: str) -> str:

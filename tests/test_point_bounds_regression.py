@@ -152,3 +152,19 @@ def test_point_answer_is_reasked_when_it_omits_an_explicit_target(point_flow):
         (300, 335),
         (400, 335),
     ]
+
+
+def test_man_made_selection_prompt_excludes_natural_objects(point_flow):
+    flow = point_flow(
+        "Qwen/Qwen3-VL-32B-Instruct",
+        (500, 500),
+        prompt="Select the targets",
+        source_question="Tap on all things that people made",
+    )
+
+    flow.run()
+
+    prompt = flow.request.await_args.args[3]
+    assert "Select only objects manufactured by people" in prompt
+    assert "pine cones" in prompt
+    assert "not its tile or collage background" in prompt

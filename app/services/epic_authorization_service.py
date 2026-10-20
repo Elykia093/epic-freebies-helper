@@ -154,6 +154,11 @@ class EpicAuthorization:
                 or not re.fullmatch(r"errors\.com\.[A-Za-z0-9_]+(?:[.-][A-Za-z0-9_]+)*", error_code)
             ):
                 error_code = "unknown_error"
+            if error_code == "errors.com.epicgames.accountportal.captcha_invalid":
+                logger.warning(
+                    "Epic rejected a captcha response | endpoint={}",
+                    endpoint,
+                )
             self._login_error_signal.put_nowait({"endpoint": endpoint, "errorCode": error_code})
         elif endpoint == "analytics" and result.get("accountId"):
             self._is_login_success_signal.put_nowait({"authenticated": True})
@@ -601,8 +606,16 @@ class EpicAuthorization:
                         raise RuntimeError(error_code)
 
                     self._captcha_rejection_retries += 1
-                    resubmitted = await self._resubmit_password_form()
-                    if not resubmitted and not await self._has_active_hcaptcha_challenge():
+                    resubmitted = await self._resubmit_password_form(timeout_ms=5000)
+                    active_challenge = (
+                        False if resubmitted else await self._has_active_hcaptcha_challenge()
+                    )
+                    if not resubmitted and not active_challenge:
+                        logger.warning(
+                            "Could not retry rejected login captcha because login controls are "
+                            "unavailable | page_path={}",
+                            urlsplit(self.page.url or "").path,
+                        )
                         raise RuntimeError(error_code)
 
                     logger.warning(
@@ -733,13 +746,13 @@ class EpicAuthorization:
         with suppress(Exception):
             await old_page.close()
 
-    async def _resubmit_password_form(self) -> bool:
+    async def _resubmit_password_form(self, *, timeout_ms: int = 1000) -> bool:
         password_input = self.page.locator("#password")
         sign_in_button = self.page.locator("#sign-in")
 
         try:
-            await password_input.wait_for(state="visible", timeout=1000)
-            await sign_in_button.wait_for(state="visible", timeout=1000)
+            await password_input.wait_for(state="visible", timeout=timeout_ms)
+            await sign_in_button.wait_for(state="visible", timeout=timeout_ms)
 
             if not await password_input.input_value(timeout=1000):
                 await password_input.fill(settings.EPIC_PASSWORD.get_secret_value())

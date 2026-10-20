@@ -345,7 +345,7 @@ def test_login_captcha_rejection_retries_current_session(auth_module):
 
     asyncio.run(run())
 
-    auth._resubmit_password_form.assert_awaited_once()
+    auth._resubmit_password_form.assert_awaited_once_with(timeout_ms=5000)
     assert auth._captcha_rejection_retries == 1
 
 
