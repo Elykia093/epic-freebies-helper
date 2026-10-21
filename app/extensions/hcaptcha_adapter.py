@@ -959,6 +959,8 @@ def apply_hcaptcha_drag_patch() -> None:
                         )
 
                     count_error = _selection_count_error(points, expected=expected_points)
+                    if count_error is None and not points:
+                        count_error = "model returned no click points"
                     if count_error is not None:
                         if answer_attempt == 0:
                             logger.warning(

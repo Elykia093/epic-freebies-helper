@@ -154,6 +154,26 @@ def test_point_answer_is_reasked_when_it_omits_an_explicit_target(point_flow):
     ]
 
 
+def test_empty_point_answer_is_reasked_when_count_is_unknown(point_flow):
+    prompt = "Select every matching target"
+    responses = [
+        ImageAreaSelectChallenge(challenge_prompt=prompt, points=[]),
+        ImageAreaSelectChallenge(challenge_prompt=prompt, points=[PointCoordinate(x=500, y=500)]),
+    ]
+    flow = point_flow(
+        "Qwen/Qwen3-VL-32B-Instruct",
+        (500, 500),
+        prompt=prompt,
+        responses=responses,
+    )
+
+    flow.run()
+
+    assert flow.request.await_count == 2
+    assert "model returned no click points" in flow.request.await_args_list[1].args[3]
+    flow.arm.page.mouse.click.assert_awaited_once_with(350, 335, delay=180)
+
+
 def test_man_made_selection_prompt_excludes_natural_objects(point_flow):
     flow = point_flow(
         "Qwen/Qwen3-VL-32B-Instruct",

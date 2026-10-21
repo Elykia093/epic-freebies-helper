@@ -1510,3 +1510,11 @@
 - 根因判断：邮箱端点与登录端点共用错误队列；邮箱拒绝到达时，页面可能已进入密码表单，也可能仍有新的邮箱挑战，旧逻辑既没有区分两种状态，也没有恢复当前表单。
 - 改动文件：`app/services/epic_authorization_service.py`、`tests/test_epic_email_recovery.py`、`docs/maintenance-log.md`。
 - 处理结果：仅在已确认认证成功或进入 MFA 后忽略迟到邮箱拒绝；其他邮箱拒绝按当前页面状态恢复邮箱表单、等待并处理新挑战，或重新提交已显示的密码表单；恢复次数继续受登录验证码预算限制。已完成 Python 语法检查和 `git diff --check`，真实 Epic 登录与领取结果待本次 Actions 运行确认。
+
+
+### 2026-10-22 对空点击点模型答案增加一次受限重问
+
+- 现象：Actions #39618403824 多次出现 `image_label_multi_select` 模型答案为空点击点，适配层直接以不安全答案终止当前挑战；同时出现一次 GLM 请求 90 秒超时。
+- 根因判断：已有的第二次回答预算只对能从题面提取显式目标数量的答案生效；没有显式数量的多选题返回空点时，数量校验跳过，随后安全校验直接抛错。现有证据支持模型响应不稳定，但不能把所有 Epic `email captcha_invalid` 都归因于模型。
+- 改动文件：`app/extensions/hcaptcha_adapter.py`、`tests/test_point_bounds_regression.py`、`tests/test_core_epic_fixes.py`、`docs/maintenance-log.md`。
+- 处理结果：无论题面是否含显式数量，空点击点都会触发一次带原因的重问；第二次仍为空时继续安全拒绝，不会提交空答案。邮箱恢复回归 13 项通过；联合模型适配、认证和 hCaptcha 回归在修复测试夹具后重新验证。

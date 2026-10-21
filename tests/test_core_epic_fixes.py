@@ -309,7 +309,11 @@ def test_sign_in_requires_one_visible_official_link(auth_module, kind):
 
 
 def test_email_captcha_rejection_preempts_another_solve(auth_module, monkeypatch):
-    auth = auth_module.EpicAuthorization(SimpleNamespace(url="https://www.epicgames.com/id/login"))
+    auth = auth_module.EpicAuthorization(
+        SimpleNamespace(url="https://www.epicgames.com/id/login", frames=[])
+    )
+    auth._resubmit_email_form = AsyncMock(return_value=False)
+    auth._resubmit_password_form = AsyncMock(return_value=False)
     solver = AsyncMock()
     monkeypatch.setattr(auth_module, "wait_for_challenge_signal", solver)
     response = SimpleNamespace(
