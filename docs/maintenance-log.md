@@ -1502,3 +1502,11 @@
   - 核对运行 `head_sha=e7cf87ee818d324b9ec34a13ca0cc2e2e37a7563`；依赖、协议检查、配套 Camoufox 和 Firefox 准备步骤全部成功，失败发生在 `Run Epic Awesome Gamer`。
   - 五次认证最终均未完成，日志以 `Epic Games authentication failed after 5 attempts` 和 `Authentication failed, aborting this run` 结束；没有确认登录或领取成功。本地 70 项测试通过不能替代这一真实认证结果。
   - runtime、日志和截图三个产物均上传成功，运行链接：https://github.com/Elykia093/epic-freebies-helper/actions/runs/39462222103 。只追加本次结果，不因文档提交再次触发领取流程。
+
+
+### 2026-10-21 恢复邮箱 CAPTCHA 拒绝后的当前登录状态
+
+- 现象：Actions #39462222103 在 hCaptcha 报告成功后收到 `/id/api/email` 的 `captcha_invalid`，旧逻辑忽略该事件后等待登录结果超时。
+- 根因判断：邮箱端点与登录端点共用错误队列；邮箱拒绝到达时，页面可能已进入密码表单，也可能仍有新的邮箱挑战，旧逻辑既没有区分两种状态，也没有恢复当前表单。
+- 改动文件：`app/services/epic_authorization_service.py`、`tests/test_epic_email_recovery.py`、`docs/maintenance-log.md`。
+- 处理结果：仅在已确认认证成功或进入 MFA 后忽略迟到邮箱拒绝；其他邮箱拒绝按当前页面状态恢复邮箱表单、等待并处理新挑战，或重新提交已显示的密码表单；恢复次数继续受登录验证码预算限制。已完成 Python 语法检查和 `git diff --check`，真实 Epic 登录与领取结果待本次 Actions 运行确认。

@@ -102,6 +102,7 @@ class EpicAuthorization:
         self._captcha_solve_attempts = 0
         self._captcha_rejection_retries = 0
         self._email_step_completed = False
+        self._email_recovery_pending = False
 
     async def _wait_for_login_challenge(
         self, agent: AgentV, *, context: str, timeout_seconds: float
@@ -602,39 +603,56 @@ class EpicAuthorization:
                 if (
                     endpoint == "email"
                     and error_code == "errors.com.epicgames.accountportal.captcha_invalid"
-                    and self._email_step_completed
+                    and (not self._is_login_success_signal.empty() or self._is_mfa_page())
                 ):
                     logger.warning(
-                        "Ignoring delayed email captcha rejection after the password form "
-                        "became visible"
+                        "Ignoring email captcha rejection after Epic confirmed authentication "
+                        "or advanced to MFA"
                     )
                     continue
 
                 if (
-                    endpoint == "login"
+                    endpoint in {"email", "login"}
                     and error_code == "errors.com.epicgames.accountportal.captcha_invalid"
                 ):
                     if self._captcha_rejection_retries >= LOGIN_CAPTCHA_ATTEMPT_LIMIT:
                         raise RuntimeError(error_code)
 
                     self._captcha_rejection_retries += 1
-                    resubmitted = await self._resubmit_password_form(timeout_ms=5000)
-                    active_challenge = (
-                        False if resubmitted else await self._has_active_hcaptcha_challenge()
-                    )
+                    if endpoint == "email":
+                        self._email_step_completed = False
+                        self._email_recovery_pending = True
+                        active_challenge = await self._has_active_hcaptcha_challenge()
+                        resubmitted = (
+                            False
+                            if active_challenge
+                            else await self._resubmit_email_form(timeout_ms=5000)
+                        )
+                        if not resubmitted and not active_challenge:
+                            resubmitted = await self._resubmit_password_form(timeout_ms=5000)
+                            if resubmitted:
+                                self._email_recovery_pending = False
+                                self._email_step_completed = True
+                    else:
+                        resubmitted = await self._resubmit_password_form(timeout_ms=5000)
+                        active_challenge = (
+                            False if resubmitted else await self._has_active_hcaptcha_challenge()
+                        )
                     if not resubmitted and not active_challenge:
                         logger.warning(
-                            "Could not retry rejected login captcha because login controls are "
-                            "unavailable | page_path={}",
+                            "Could not retry rejected captcha because login controls are "
+                            "unavailable | endpoint={} | page_path={}",
+                            endpoint,
                             urlsplit(self.page.url or "").path,
                         )
                         raise RuntimeError(error_code)
 
                     logger.warning(
-                        "Epic rejected the login captcha response; retrying the current login "
-                        "session ({}/{})",
+                        "Epic rejected a captcha response; retrying the current login "
+                        "session ({}/{}) | endpoint={}",
                         self._captcha_rejection_retries,
                         LOGIN_CAPTCHA_ATTEMPT_LIMIT,
+                        endpoint,
                     )
                     extend_deadline("captcha-rejected", 120)
                     continue
@@ -743,6 +761,19 @@ class EpicAuthorization:
                 await submit_fresh_totp("mfa_page")
                 continue
 
+            if (
+                self._email_recovery_pending
+                and not self._is_mfa_page()
+                and await self.page.locator("#password").is_visible()
+                and await self.page.locator("#sign-in").is_visible()
+                and await self._resubmit_password_form(timeout_ms=1000)
+            ):
+                self._email_recovery_pending = False
+                self._email_step_completed = True
+                logger.info("Submitted the password form after recovering the email step")
+                extend_deadline("email-step-recovered", 120)
+                continue
+
             if not self._is_mfa_page() and "/id/login" not in self.page.url:
                 if "true" == await self._get_login_status(timeout_ms=500, warn_timeout=False):
                     return
@@ -757,6 +788,26 @@ class EpicAuthorization:
         self.page.on("response", self._on_response_anything)
         with suppress(Exception):
             await old_page.close()
+
+    async def _resubmit_email_form(self, *, timeout_ms: int = 5000) -> bool:
+        """Refresh a rejected email page before submitting a new challenge request."""
+        try:
+            async with asyncio.timeout(timeout_ms / 1000):
+                email_input = self.page.locator("#email")
+                continue_button = self.page.locator("#continue")
+                if not await email_input.is_visible() or not await continue_button.is_visible():
+                    return False
+                await self.page.reload(wait_until="domcontentloaded", timeout=timeout_ms)
+                await email_input.wait_for(state="visible", timeout=timeout_ms)
+                await email_input.fill(settings.EPIC_EMAIL, timeout=timeout_ms)
+                await continue_button.click(timeout=timeout_ms, no_wait_after=True)
+                return True
+        except (TimeoutError, PlaywrightError) as err:
+            logger.warning(
+                "Could not resubmit Epic email form after captcha rejection | error_type={}",
+                type(err).__name__,
+            )
+            return False
 
     async def _resubmit_password_form(self, *, timeout_ms: int = 1000) -> bool:
         password_input = self.page.locator("#password")
@@ -914,6 +965,7 @@ class EpicAuthorization:
         self._captcha_solve_attempts = 0
         self._captcha_rejection_retries = 0
         self._email_step_completed = False
+        self._email_recovery_pending = False
         # 尽可能早地初始化机器人
         agent = AgentV(page=self.page, agent_config=settings)
 
